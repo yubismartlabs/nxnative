@@ -14,11 +14,39 @@ The NSP script's provisional profile as it was made. There is no game-specific h
 | `modules main subsdk0 sdk` | [`game.tsv`](game.tsv) | `main` imports both |
 | `mem_reserve 0x100000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | `game.tsv` | `profile_guess.py`'s hardware pool: the game sets a 3.14 GB heap in the 3.25 GB heap region |
 | `sys_resource 0x0` | `game.tsv` | the NPDM declares no system resource, so no virtual address memory |
+| `depth_mode zero` | `game.tsv` | the game sets NVN near=0; offline pipeline bases must use the same vertex entry point |
 | [`pso_manifest.tsv`](pso_manifest.tsv) | profile | the prewarm list: 229 shaders and 156 render pipelines, recorded on the Mac over a new save from boot to the first drive and a load of that save |
 
 ## Shaders
 
 376 (192 pixel, 184 vertex): 138 from `main` and 238 from the Bundle 2 files. The 184 vertex shaders are single-stage programs, each paired with one pixel cover for padding (`c1a608e6add64c26`). Before the version 2 layout was read, the split read 2,882 of the game's files as damaged and kept only `main`'s 138. Those are the effect, sky and HUD shaders, so the road, buildings, cars and traffic were never drawn (#1219).
+
+## Movie-order repair and current Mac confirmation
+
+On November 17, 2026, the player reported stuttering in movies and driving on
+an Apple M2 Mac (macOS 27.2). Rendering continued at approximately 60 fps with
+no missing shader keys. The opening MP4 is 1920x1080 at 30 pictures per second,
+with B pictures, while the game sends every video packet with timestamp zero.
+
+The host lost type-0 POC tracking at the first adaptive reference-marking
+operation and then returned decode order. A hardware-decoder comparison found
+209 misplaced pictures in the first 300. The general decoder fix now keeps
+POC ordering independently of the sliding-window DPB model. All 3,152 intro
+pictures match a reference ordered by the MP4's composition timestamps, with
+zero mismatches. See [adaptive reference marking and zero timestamps](../../../docs/reference/movies.md#adaptive-h264-reference-marking-loses-picture-order-with-zero-timestamps).
+
+The corrected Mac host ran for over 27,600 frames with sound and saves. Later
+300-frame windows show median frame times around 16.67 ms, and p95 values
+around 16.8 ms. There was no crash or missing shader. The two previously noted
+unimplemented raster-state calls still report at startup; their visual effect
+remains unisolated. The player confirmed that everything works after trying
+the corrected build, including the reported movie/driving symptoms.
+
+The repaired run's new save is retained locally and promoted to the normal
+save location after the test exits. Test logs, movie samples and binaries are
+kept in the game's work folder, outside the repository. The profile's explicit
+`depth_mode zero` also makes future offline prebuilds agree with the observed
+runtime mode. iOS, later races and a full long-duration campaign remain untested.
 
 ## Frame rate
 
@@ -55,6 +83,8 @@ From a new save:
 `rec/save` holds a save after the first drive, from which `Enter Paradise City` goes straight to the city.
 
 ## Found on this game
+
+- [Adaptive H.264 reference marking with zero timestamps](../../../docs/reference/movies.md#adaptive-h264-reference-marking-loses-picture-order-with-zero-timestamps): preserve POC order across supported adaptive marking.
 
 General changes first needed here; each applies to every game:
 

@@ -30,6 +30,10 @@ app_pool	0xCD500000
 # the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
 sys_resource	0x0
 
+# ---- Graphics ----
+# Observed nvnDeviceSetDepthMode near=0. Offline pipeline prebuild must agree.
+depth_mode	zero
+
 # ---- Shader split ----
 shader_groups	/SOUND/=sound /VEHICLES/=vehicles /GUIAPT/=guiapt /WHEELS/=wheels /ENGINES/=engines /LUA/=lua /LANGUAGE/=language /ENVIRONMENTSETTINGS/=environmentsetti /VIDEOS/=videos /POSTFX/=postfx /DOWNLOADED/=downloaded /VDB/=vdb /VEHICLEDEFS/=vehicledefs /GPGPU/=gpgpu /PROPS/=props
 shader_note	Burnout Paradise Remastered shaders
