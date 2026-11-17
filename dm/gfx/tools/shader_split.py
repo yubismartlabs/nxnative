@@ -3574,6 +3574,11 @@ def scan_file_in(args):
     if ext in ('.data', '.patch', '.debug', '.nxpc') and os.path.exists(stem + '.dict'): return rel, {}, set(), {}   # read through its Next Level Games index (nlg_shaders)
     with open(path, 'rb') as f: head = f.read(16)
     found = []; trees = {}
+    if head[:4] == b'IDCL':
+        import idcl
+        for name, body in idcl.shader_members(path, oodle):
+            found += glslc_shaders(body, f'/{rel}#{name}', need=False)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == b'IGA\x1a':
         import alchemy
         for name, body in alchemy.shader_members(path):

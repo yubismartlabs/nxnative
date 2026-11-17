@@ -231,6 +231,14 @@ One row per profile; the notes are each profile's `README.md`.
 | [Yoshi and the Mysterious Book](0400245021D2C000/README.md) | `0400245021D2C000` | 1.0.2 (Switch 2) | 20.5.15 (Ounce) | Unreal Engine 5.4.4 | NVN2 |
 | [Yoshi's Crafted World](01006000040C2000/README.md) | `01006000040C2000` | 1.0.1 | 4.4.1 | Unreal Engine 4.18 era (Good-Feel) | NVN |
 
+## Profiles awaiting gameplay validation
+
+These profiles are published for bring-up and are not yet confirmed playable.
+
+| Game | Title ID | Build | SDK | Engine | Graphics |
+|---|---|---|---|---|---|
+| [Wolfenstein II: The New Colossus](01009040091E0000/README.md) | `01009040091E0000` | 1.2 (v131072), gameplay pending | 4.4.0 | id Tech 6 | NVN |
+
 ## Keys
 
 | Key | Meaning |

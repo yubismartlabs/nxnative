@@ -1,0 +1,35 @@
+# ---- Identity ----
+title_id	01009040091E0000
+program_id	01009040091E0000
+
+# ---- App ----
+name	Wolfenstein II: The New Colossus
+ipa	WolfensteinIiTheNewColossus.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.2	main=f2fe5ef877839f4f9334388d278366b2	sdk=9de92bad67c4150268943ab4843ace65
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	base/gameresources.texdb
+zip_store	.bin:.bk2:.pack:.pages:.resources:.texdb:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/base/=base /virtualtextures/=virtualtextures
+shader_note	Wolfenstein® II: The New Colossus™ shaders
+
+# Observed at NVN device startup: near=0.
+depth_mode	zero

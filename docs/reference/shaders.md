@@ -4,6 +4,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Containers by engine
 
+### id Tech 6 IDCL rendering resources
+
+- **Symptom:** the shader split finds zero shaders and stops the build for Wolfenstein II; the raw RomFS contains no exposed GLSLC programs.
+- **Cause:** the IDCL v12 archives hold Oodle-compressed `renderProgResource` payloads. The Switch directory indexes u64 words in a type/name reference table; assuming a sequential reference pair per directory record reads unrelated names. Empty patch sound archives can place their aligned data offset beyond EOF.
+- **Fix:** `dm/gfx/tools/idcl.py` validates the directory, strings, references and payload ranges, selects rendering resources by type, and decodes only those payloads through the game's own Oodle decoder. `shader_split.py` reads their complete GLSLC outputs and preserves the existing program variation pairs. `profile_guess.py` selects the offline decoder host for IDCL archives. Detection uses the archive signature, with no title or build gate.
+- **Check:** `test_split_idcl.py` covers indexed references, stored and decoded resources, empty patch packs, truncated payloads, invalid indexes, compression and versions. Wolfenstein II 1.2's three resource archives yield 4,366 unique programs.
+- **Found on:** [Wolfenstein II: The New Colossus](../../dm/games/01009040091E0000/README.md).
+
 ### Alchemy IGA shader archives
 
 - **Symptom:** Crash Bandicoot N. Sane Trilogy presents a black or incomplete picture while running, reports `shader ... is not in the shader map` and an unmapped vertex shader, and the split finds only 12 shaders.

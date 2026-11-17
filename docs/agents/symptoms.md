@@ -1126,6 +1126,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Shaders
 
+- the shader split finds zero shaders and stops the build for Wolfenstein II; the raw RomFS contains no exposed GLSLC programs. → [id Tech 6 IDCL rendering resources](../reference/shaders.md#id-tech-6-idcl-rendering-resources)
 - Crash Bandicoot N. Sane Trilogy presents a black or incomplete picture while running, reports `shader ... is not in the shader map` and an unmapped vertex shader, and the split finds only 12 shaders. → [Alchemy IGA shader archives](../reference/shaders.md#alchemy-iga-shader-archives)
 - the shader split stops with no shaders in `main` or RomFS, and the host reports missing programs while presenting a black picture. → [Firaxis CIVBSF shader libraries](../reference/shaders.md#firaxis-civbsf-shader-libraries)
 - the split finds only the GLSLC outputs in the executable, while the game presents a black picture and reports missing vertex, pixel and compute shaders. → [Larian LSPK packages and BSHD programs](../reference/shaders.md#larian-lspk-packages-and-bshd-programs)

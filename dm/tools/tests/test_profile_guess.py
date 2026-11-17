@@ -108,6 +108,12 @@ class HeapCheckAddressSpace(unittest.TestCase):
 
 
 class GlslSources(unittest.TestCase):
+    def test_idcl_uses_the_game_decoder(self):
+        s = pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0, idcl_packs=3)
+        self.assertEqual(s['graphics'][0], 'nvn')
+        self.assertTrue(s['oodle_packs'][0])
+        self.assertIn('IDCL', s['oodle_packs'][1])
+
     def test_language_preamble_is_not_a_shader(self):
         self.assertEqual(pg.glsl_sources(b'#version 450 core\n#define float4 vec4\n\0void main() {}\0'), 0)
 
