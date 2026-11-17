@@ -2,8 +2,8 @@
 // Super Mario Odyssey's 44 movies are MP4 / H.264 (the hint videos in its tutorial boxes, the kingdom travel videos): 41 High or Main profile with B-frames, 3 Baseline.
 // The SDK's demuxer hands over one access unit per packet with Annex B start codes; SPS / PPS come in Configure's csd-0 / csd-1 (as with Android's MediaCodec) and may also appear in the stream.
 // VideoToolbox wants a format description built from SPS / PPS and NAL units with 4-byte length prefixes. Decoding is synchronous and yields pictures in decode order; MediaCodec yields them
-// in presentation order. For progressive POC type 0 and sliding-window references, Annex C's DPB occupancy and the SPS reorder bound
-// determine which pictures can leave, sorted by coded sequence then POC. Other streams retain timestamp sorting and bounded lookahead;
+// in presentation order. Progressive POC type 0 is sorted by coded sequence then POC, including adaptive reference marking.
+// Sliding-window references use Annex C DPB occupancy; adaptive marking uses the SPS reorder bound. Other layouts retain timestamp sorting and bounded lookahead;
 // complete sequences and end of stream drain the queue. PTS is carried through unchanged, never used to infer a frame interval.
 // SPS pic_order_cnt_type 2 has decode order equal to output order: even High profile needs no reorder queue in that case
 #include "hle.h"
@@ -24,7 +24,8 @@ struct mavc {
     struct { CVPixelBufferRef pb; int64_t pts; avc_frame order; int ready; } q[QMAX]; int nq, depth;
     uint64_t sequence; int saw_picture;
     avc_sps sp; avc_pps pp;
-    int ordered, prev_frame, prev_lsb; int64_t prev_msb; uint64_t refs;
+    int ordered, poc_order, prev_frame, prev_lsb; // ordered: sliding-window DPB model; poc_order: valid type-0 output ordering
+    int64_t prev_msb; uint64_t refs;
     uint8_t *au; size_t aucap;   // length-prefixed copy of the access unit being decoded
     int red, rgba;               // rgba: pictures as 4-byte RGBA (native texture mode, Monster Hunter Rise) instead of NV12
     movie_vt_history history;
@@ -40,7 +41,7 @@ static void close_session(mavc *a) {
     if (a->vs) { VTDecompressionSessionWaitForAsynchronousFrames(a->vs); VTDecompressionSessionInvalidate(a->vs); CFRelease(a->vs); a->vs = NULL; }
     if (a->fd) { CFRelease(a->fd); a->fd = NULL; }
 }
-void mavc_drop(mavc *a) { for (int i = 0; i < a->nq; i++) CVPixelBufferRelease(a->q[i].pb); a->nq = 0; a->sequence = 0; a->saw_picture = 0; a->ordered = 0; a->refs = 0; movie_vt_clear(&a->history); }
+void mavc_drop(mavc *a) { for (int i = 0; i < a->nq; i++) CVPixelBufferRelease(a->q[i].pb); a->nq = 0; a->sequence = 0; a->saw_picture = 0; a->ordered = a->poc_order = 0; a->refs = 0; movie_vt_clear(&a->history); }
 void mavc_free(mavc *a) { if (!a) return; close_session(a); mavc_drop(a); free(a->au); free(a); }
 int mavc_queued(const mavc *a) { return a->nq; }
 int mavc_ready(const mavc *a) { return a->nq && (a->q[0].ready || a->q[0].order.sequence != a->sequence || (!a->ordered && a->nq > a->depth)); }
@@ -181,7 +182,7 @@ static void keep_ps(mavc *a, const uint8_t *nal, size_t n) {   // a parameter se
     if (n > sizeof a->sps) { if (!a->red++) LOG("[RED] movie: AVC parameter set of %zu bytes, too long", n); return; }
     if ((size_t)*dn == n && !memcmp(dst, nal, n)) return;
     memcpy(dst, nal, n); *dn = (int)n; a->dirty = 1;
-    a->ordered = 0; // a changed parameter set cannot inherit the previous DPB interpretation
+    a->ordered = a->poc_order = 0; // changed parameter sets invalidate both POC and DPB tracking
     if (t == 7) { a->sp = avc_read_sps(nal, n); a->depth = a->sp.depth; }
     else a->pp = avc_read_pps(nal, n);
 }
@@ -216,7 +217,7 @@ void mavc_avcc(mavc *a, const uint8_t *p, size_t n) {
     }
 }
 
-typedef struct { int valid, frame, lsb, bottom, reference, idr, discard; } avc_slice;
+typedef struct { int valid, frame, lsb, bottom, reference, idr, discard, adaptive; } avc_slice;
 static avc_slice avc_read_slice(const mavc *a, const uint8_t *nal, size_t n) {
     avc_slice s = {0}; const avc_sps *sp = &a->sp; const avc_pps *pp = &a->pp;
     int type = nal[0] & 31;
@@ -253,16 +254,29 @@ static avc_slice avc_read_slice(const mavc *a, const uint8_t *nal, size_t n) {
         }
     }
     if (s.reference) {
-        if (s.idr) { s.discard = (int)avc_u(&b, 1); if (avc_u(&b, 1)) return s; } // long-term IDR reference
-        else if (avc_u(&b, 1)) return s; // adaptive marking, including MMCO 5: no sliding-window guarantee
+        if (s.idr) { s.discard = (int)avc_u(&b, 1); s.adaptive = (int)avc_u(&b, 1); } // long-term IDR: POC is valid, sliding-window DPB is not
+        else if ((s.adaptive = (int)avc_u(&b, 1))) {
+            // 7.3.3.3: adaptive reference marking does not invalidate type-0
+            // POC. Parse its operands so damaged lists and MMCO 5 (which resets
+            // POC state) retain the existing fallback instead of guessing.
+            for (unsigned i = 0; !b.bad; i++) {
+                unsigned op = avc_ue(&b);
+                if (!op) break;
+                if (i >= 32 || op > 6 || op == 5) return s;
+                if (op == 1 || op == 3) avc_ue(&b);
+                if (op == 2) avc_ue(&b);
+                if (op == 3 || op == 6) avc_ue(&b);
+                if (op == 4) avc_ue(&b);
+            }
+        }
     }
     s.valid = !b.bad && (!s.idr || (s.reference && !s.frame)); return s;
 }
 
 // The optimized DPB is deliberately limited to progressive POC type 0 with sliding-window reference marking.
-// A changed/unsupported header, a frame_num gap, or a decode error returns to the existing lookahead/EOS path until an IDR.
+// Adaptive marking and frame_num gaps retain POC sorting with bounded lookahead; unsupported headers or decode errors fall back to timestamps until an IDR.
 static void avc_order_stop(mavc *a) {
-    a->ordered = 0;
+    a->ordered = a->poc_order = 0;
     for (int i = 1; i < a->nq; i++) {
         __typeof__(a->q[0]) p = a->q[i]; int k = i;
         while (k && a->q[k - 1].order.sequence == p.order.sequence && a->q[k - 1].pts > p.pts) { a->q[k] = a->q[k - 1]; k--; }
@@ -271,16 +285,20 @@ static void avc_order_stop(mavc *a) {
 }
 static avc_frame avc_order_picture(mavc *a, const avc_slice *s) {
     avc_frame f = {.sequence = a->sequence};
-    if (!a->depth || !s->valid || !a->sp.refs || (!s->idr && (!a->ordered || s->frame != (a->prev_frame + 1) % (1 << a->sp.frame_bits)))) {
+    if (!a->depth || !s->valid || !a->sp.refs || (!s->idr && !a->poc_order)) {
         avc_order_stop(a); return f;
     }
     if (s->idr) {
-        a->ordered = 1; a->refs = 0; a->prev_frame = a->prev_lsb = 0; a->prev_msb = 0;
+        a->ordered = a->poc_order = 1; a->refs = 0; a->prev_frame = a->prev_lsb = 0; a->prev_msb = 0;
         if (s->discard) {
             for (int i = 0; i < a->nq; i++) CVPixelBufferRelease(a->q[i].pb);
             a->nq = 0;
         }
     }
+    // Adaptive/long-term marking or frame-number gaps invalidate our simple
+    // DPB occupancy model, but POC still comes from the previous reference
+    // picture. Keep sorting by POC with the SPS reorder bound as lookahead.
+    if (s->adaptive || (!s->idr && s->frame != (a->prev_frame + 1) % (1 << a->sp.frame_bits))) a->ordered = 0;
     int max_lsb = 1 << a->sp.poc_bits; int64_t msb = a->prev_msb;
     if (s->lsb < a->prev_lsb && a->prev_lsb - s->lsb >= max_lsb / 2) msb += max_lsb;
     else if (s->lsb > a->prev_lsb && s->lsb - a->prev_lsb > max_lsb / 2) msb -= max_lsb;
@@ -316,7 +334,7 @@ static void on_frame(void *ref, void *src, OSStatus st, VTDecodeInfoFlags fl, CV
     if (!order.ordered) avc_order_stop(a);
     int k = a->nq;
     while (k > 0 && (a->q[k - 1].order.sequence > order.sequence ||
-                    (a->q[k - 1].order.sequence == order.sequence && (a->ordered ? a->q[k - 1].order.poc > order.poc : a->q[k - 1].pts > t)))) { a->q[k] = a->q[k - 1]; k--; }
+                    (a->q[k - 1].order.sequence == order.sequence && (a->poc_order ? a->q[k - 1].order.poc > order.poc : a->q[k - 1].pts > t)))) { a->q[k] = a->q[k - 1]; k--; }
     a->q[k].pb = CVPixelBufferRetain(img); a->q[k].pts = t; a->q[k].order = order; a->q[k].ready = 0; a->nq++;
     avc_bump(a);
 }
@@ -347,7 +365,7 @@ static void au_add(void *ctx, const uint8_t *nal, size_t n) {
         avc_slice s = avc_read_slice(a, nal, n);
         if (!c->picture) c->slice = s;
         else if (!s.valid || s.frame != c->slice.frame || s.lsb != c->slice.lsb || s.bottom != c->slice.bottom ||
-                 s.reference != c->slice.reference || s.idr != c->slice.idr || s.discard != c->slice.discard) c->slice.valid = 0;
+                 s.reference != c->slice.reference || s.idr != c->slice.idr || s.discard != c->slice.discard || s.adaptive != c->slice.adaptive) c->slice.valid = 0;
         c->picture = 1;
     }
     if (t == 5) c->idr = 1;

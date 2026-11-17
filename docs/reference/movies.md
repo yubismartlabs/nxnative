@@ -4,6 +4,14 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 
 ## Decoder lifecycle
 
+### Adaptive H.264 reference marking loses picture order with zero timestamps
+
+- **Symptom:** a movie jitters backward and forward while the game presents at a steady 60 fps; all `SendInputBufferForDecode` timestamps are zero. Burnout Paradise Remastered's intro returned 209 of its first 300 pictures in the wrong presentation positions.
+- **Cause:** the progressive type-0 POC parser rejected every adaptive reference-marking flag and disabled both its sliding-window DPB model and POC sorting. VideoToolbox yields decode order, so the fallback's timestamp sort could not reorder a zero-timestamp stream, even though the bitstream still supplied valid picture order counts.
+- **Fix:** parse adaptive reference-marking operands, preserve type-0 POC across supported marking changes, and track POC validity separately from the sliding-window DPB approximation. Adaptive marking, long-term IDR references and frame-number gaps disable only that approximation; the SPS reorder bound supplies lookahead. Changed/unsupported headers, decode failures and MMCO 5 (POC reset, not implemented by this reader) retain the existing timestamp fallback until an IDR. Packet timestamps are passed through unchanged; no cadence, delay or title-specific key is introduced.
+- **Check:** `t_movie_avc` covers zero-timestamp adaptive operations, POC and frame-number wraps, flush/reset and the unsupported MMCO-5 boundary; ordinary and AddressSanitizer/UBSan runs pass. The related `t_codec_video` hardware recovery/lifecycle suite passes. Every one of Burnout's 3,152 intro pictures matches the presentation-order reference after the fix, with zero mismatches. The player confirmed working movie and driving playback on the Apple M2 Mac.
+- **Found on:** [Burnout Paradise Remastered](../../dm/games/0100DBF01000A000/README.md), base 1.0.0, SDK 9.3.0. Ordering follows H.264 clauses 7.3.3.3 and 8.2.1; the reader still does not implement MMCO-5 POC resets.
+
 ### Audio decoder history survives a movie seek
 
 - **Symptom:** AAC samples after a seek or loop differ from a fresh decode of the same packets; the old position's overlap can contaminate the beginning of the new position.

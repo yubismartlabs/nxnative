@@ -198,7 +198,20 @@ static void dpb_picture(mavc *a, int idr, int reference, int frame, int poc, int
         put(&w, 0, 1); put(&w, 0, 1); // reference override, list 0 modification
         if (!reference) put(&w, 0, 1); // list 1 modification
     }
-    if (reference) { put(&w, adaptive, 1); if (idr) put(&w, 0, 1); else if (adaptive) ue(&w, 0); }
+    if (reference) {
+        put(&w, idr ? (adaptive & 1) : adaptive != 0, 1);
+        if (idr) put(&w, (adaptive >> 1) & 1, 1);
+        else if (adaptive) {
+            if (adaptive > 1) {
+                unsigned op = (unsigned)adaptive - 1; ue(&w, op);
+                if (op == 1 || op == 3) ue(&w, 0);
+                if (op == 2) ue(&w, 0);
+                if (op == 3 || op == 6) ue(&w, 0);
+                if (op == 4) ue(&w, 0);
+            }
+            ue(&w, 0);
+        }
+    }
     put(&w, 1, 1); while (w.bit % 8) put(&w, 0, 1); put(&w, (unsigned)marker, 8);
     size_t n = escaped_nal(&w, au + 4);
     assert(!mavc_decode(a, au, (int)n + 4, pts));
@@ -257,6 +270,43 @@ static void dpb_reordered_b(void) {
     assert(mavc_take(a, 1, out, 16, 16, &pts) && out[0] == 48 && !pts);
     synthetic_free(a);
 }
+// Reference marking changes the DPB model, not the type-0 POC arithmetic.
+// Zero PTS cannot substitute for POC (Burnout's decoder input uses zero times).
+static void adaptive_poc_order(void) {
+    // A long-term IDR reference also retains POC while disabling sliding-window occupancy.
+    mavc *long_term = synthetic_avc(); dpb_params(long_term, 100, 4, 1, 2, 4);
+    int long_got = 0;
+    dpb_picture(long_term, 1, 1, 0, 0, 16, 0, 2);
+    assert(long_term->poc_order && !long_term->ordered);
+    dpb_picture(long_term, 0, 1, 1, 6, 19, 0, 0);
+    dpb_picture(long_term, 0, 0, 2, 2, 17, 0, 0); dpb_check_output(long_term, 0, 0, &long_got);
+    dpb_picture(long_term, 0, 0, 2, 4, 18, 0, 0); dpb_check_output(long_term, 0, 0, &long_got);
+    dpb_check_output(long_term, 1, 0, &long_got); assert(long_got == 4);
+    synthetic_free(long_term);
+    for (int marking = 1; marking <= 7; marking++) {
+        if (marking == 6) continue; // MMCO 5 resets POC, kept on the unsupported-layout fallback
+        mavc *a = synthetic_avc(); dpb_params(a, 100, 4, 0, 0, 0);
+        int got = 0;
+        dpb_picture(a, 1, 1, 0, 0, 16, 0, 0);
+        for (int group = 1; group <= 24; group++) {
+            int p = group * 3;
+            dpb_picture(a, 0, 1, group, 2 * p, 16 + p, 0, marking);
+            assert(a->poc_order && !a->ordered);
+            dpb_check_output(a, 0, 0, &got);
+            for (int b = p - 2; b < p; b++) {
+                dpb_picture(a, 0, 0, group + 1, 2 * b, 16 + b, 0, 0);
+                dpb_check_output(a, 0, 0, &got);
+            }
+        }
+        dpb_check_output(a, 1, 0, &got); assert(got == 73);
+        mavc_drop(a); assert(!a->ordered && !a->poc_order);
+        dpb_picture(a, 1, 1, 0, 0, 16, 0, 0);
+        dpb_picture(a, 0, 1, 1, 6, 19, 3000, 6);
+        assert(!a->ordered && !a->poc_order); // do not carry POC through an unimplemented MMCO-5 reset
+        synthetic_free(a);
+    }
+}
+
 static void dpb_limits(void) {
     mavc *a = synthetic_avc(); dpb_params(a, 100, 4, 1, 1, 4);
     assert(a->sp.valid && a->sp.reorder == 1);
@@ -436,7 +486,7 @@ static void native_buffers(void) {
     pthread_mutex_destroy(&d.mu);
 }
 int main(void) {
-    dpb_order(); dpb_reordered_b(); dpb_limits(); pump_due();
+    dpb_order(); adaptive_poc_order(); dpb_reordered_b(); dpb_limits(); pump_due();
     puts("AVC DPB: reference occupancy drives output, with variable/zero PTS, POC and frame_num wraps, IDR/Flush, reordered B-pictures, bounds, unsupported marking and slot-release pumping");
     loop_order(1); loop_order(0);
     puts("AVC loops: all 36 pictures ordered through packet parsing and callback refcons, with 3- and 4-byte start codes");
