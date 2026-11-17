@@ -6,6 +6,8 @@ It is not an emulator: the game's own code runs directly on the Apple chip, with
 
 [Games](#games) · [Community front ends](#community-front-ends) · [Requirements](#requirements) · [How to play](#how-to-play) · [Discussions](#discussions) · [For developers](#for-developers)
 
+For this fork: [checking and merging official NXNative updates](docs/fork-updates.md).
+
 ## Games
 
 The full [tested games table](dm/games/README.md#games) includes original Switch games, tested builds, engines and graphics APIs. Each game's note records its tested platforms, progress and known issues.
