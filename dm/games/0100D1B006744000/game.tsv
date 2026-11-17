@@ -1,0 +1,40 @@
+# Game profile of Crash Bandicoot N. Sane Trilogy (Switch, base 1.0.0).
+# Mac gameplay and audio tested; iOS untested. Format: dm/games/README.md.
+# Alchemy v12 IGA shader archives require the accompanying shader_split patch.
+
+# ---- Identity ----
+title_id	0100D1B006744000
+program_id	0100D1B006744000
+
+# ---- App ----
+name	Crash Bandicoot™ N. Sane Trilogy
+ipa	CrashBandicootNSaneTrilogy.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.0	main=29e1a37d84227147a50a18d055fbb032	subsdk0=a82aa14c5d5a359ad04dc4eab9f5d590	sdk=c871c614793a419581104bec9379efa3
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	archives/l300_hub.pak
+zip_store	.bk2:.pak:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Graphics ----
+# Observed nvnDeviceSetDepthMode near=0; offline prebuild must agree.
+depth_mode	zero
+
+# ---- Shader split ----
+shader_groups	/archives/=archives
+shader_note	Crash Bandicoot™ N. Sane Trilogy shaders

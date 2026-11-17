@@ -4,6 +4,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Containers by engine
 
+### Alchemy IGA shader archives
+
+- **Symptom:** Crash Bandicoot N. Sane Trilogy presents a black or incomplete picture while running, reports `shader ... is not in the shader map` and an unmapped vertex shader, and the split finds only 12 shaders.
+- **Cause:** its shader assets are IGZ files in little-endian version 12 IGA archives. A raw scan cannot see their LZMA-compressed GLSLC outputs.
+- **Fix:** `dm/gfx/tools/alchemy.py` reads the file records, name table and u32/u16/u8 sector tables. The high bit of a block start marks LZMA; the remaining bits locate its aligned sectors. Compressed blocks carry a u32 payload length and five LZMA property bytes. `shader_split.py` dispatches on the IGA magic, decodes only `shaders/*.igz` members and scans their complete GLSLC outputs. No title ID, archive filename or fixed shader keys are required. Bounds and supported layouts are checked before decoding.
+- **Check:** `dm/tools/tests/test_split_alchemy.py` exercises stored members, stored/compressed/mixed blocks, both small and large sector-table widths, skipped non-shader members and malformed headers, tables, offsets and compression metadata. The real archive's 84 decoded assets match the working extraction byte for byte; the complete scanner regenerates all 1,635 working shader keys. Mac gameplay and audio passed on the first level; broader regression and iOS remain open.
+- **Found on:** [Crash Bandicoot N. Sane Trilogy](../../dm/games/0100D1B006744000/README.md), base 1.0.0, SDK 3.5.3.
+
 ### Firaxis CIVBSF shader libraries
 
 - **Symptom:** the shader split stops with no shaders in `main` or RomFS, and the host reports missing programs while presenting a black picture.
