@@ -46,7 +46,7 @@ play the affected games before treating the update as validated.
 ## Shader-chain metadata in this fork
 
 Current upstream fingerprints `shader_split.py` as part of the translation
-chain. This fork also fingerprints its imported `alchemy.py` reader. After
+chain. This fork also fingerprints its imported `alchemy.py` and `idcl.py` readers. After
 resolving an update that changes either file, regenerate the chain header:
 
 ```sh
@@ -56,3 +56,24 @@ python3 dm/gfx/tools/dmsh_chain.py --header
 Include the resulting header in the reviewed merge, then rebuild affected
 shader libraries and the host. A changed chain version invalidates older
 compiled libraries even when the shader-map keys stay the same.
+
+## Reviewed upstream merge: 2026-11-18
+
+- Official main incorporated through `0b5fd602` (50 incoming commits).
+- Fork main before the merge: `b59ac4d5`, preserved on
+  `backup/before-upstream-2026-11-18` on origin.
+- All six fork-only commits are retained in the merge history. The Crash,
+  Burnout and Wolfenstein profiles, Alchemy and IDCL readers, AVC picture-order
+  fix, and manual update script remain present.
+- Unfinished Wolfenstein depth-prepass work is separately preserved at
+  `4fd7b8ad` on `wip/wolfenstein-depth-prepass-2026-11-18`; it is not included
+  in this main-branch update. Purple rendering remains under investigation.
+- The only conflict was the generated `dmsh_chain.h`; it was regenerated from
+  the combined source tree. The resulting chain is `a83fdd39d6b1`.
+- Validation: 92 focused Python tests pass, shader-tool integrity passes,
+  and the native AVC suite passes, including adaptive picture order and
+  upstream's NV12 color-key cases. No gameplay or full shader rebuild was
+  performed for this merge.
+
+Rebuild each game's shader libraries and host before using this updated source
+with that game. Existing binaries and libraries belong to the older chain.
