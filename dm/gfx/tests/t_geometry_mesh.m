@@ -16,11 +16,12 @@ static int mr_bit(unsigned v) { return v % 5 != 2; }
 static int mr_discard(unsigned k) { return k == 2; }   // the fragment case: draws whose fragment uniform discards   // the kernel keeps triangle t of a draw when vertex (first + t)'s bit is set
 static NvProg *mr_nolib;   // the test pair's kernel after another vertex shader, which has no mesh library
 static int run_case(NSString *directory, int pass, int counting, int frag) {
+    int no_fragment = frag == 2; frag = frag == 1;
     NSError *error = nil;
     id<MTLLibrary> vl = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:[directory stringByAppendingPathComponent:@"vertex.metallib"]] error:&error];
     id<MTLLibrary> ll = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:[directory stringByAppendingPathComponent:@"lean.metallib"]] error:&error];
     if (!vl || !ll) { fprintf(stderr, "fixture missing: %s\n", error.description.UTF8String); return 1; }
-    static NvProg *pr, *pk; static prog_t cp, ck;
+    static NvProg *pr, *pk; static prog_t cp, ck; static NvShader *depth_fragment;
     if (!pr) {
         g_msl_dir = directory; g_shcache = [NSMutableDictionary dictionary];
         pr = [NvProg new];
@@ -28,6 +29,7 @@ static int run_case(NSString *directory, int pass, int counting, int frag) {
         vs->rf.nb = 1; vs->rf.b[0] = (nvn_rbind){.kind = NVN_RB_CBUF, .reg = 0, .aid = 0}; vs->ae = [vs->fn newArgumentEncoderWithBufferIndex:0]; vs->arg_len = vs->ae.encodedLength;
         vs->has_pull = 1; vs->rf.nv = 1; vs->rf.v[0].ct = NVN_CT_FLOAT; vs->rf.v[0].nvn = vs->rf.v[0].loc = 0;
         NvShader *fs = shader(vl, @"depth_only", 1, NULL, 0);
+        depth_fragment = fs;
         NvShader *gs = shader(ll, @"main0", 2, NULL, 0); strcpy(gs->key, "7e57000000000b00_b"); gs->geo_vertices = 3; gs->geo_invocations = 1; gs->geo_output = 3; gs->geo_stride = 134; gs->geo_index_stride = 6;
         NvShader *lean = shader(ll, @"main0", 2, NULL, 0); strcpy(lean->key, "7e57000000000b00_bl3"); lean->geo_vertices = 3; lean->geo_invocations = 1;
         // slots by member order (the block is a plain struct: the translator numbers its ids 0, 1, 2 ...; the test kernel's 1, 2, 4 are only names)
@@ -49,6 +51,7 @@ static int run_case(NSString *directory, int pass, int counting, int frag) {
         mr_nolib = [NvProg new]; mr_nolib->sh[0] = v2; mr_nolib->sh[1] = fs; mr_nolib->sh[2] = gs; [keep addObjectsFromArray:@[mr_nolib, v2]];
         ck.serial = 8951; serial_put(ck.serial, pk);
     }
+    pr->sh[1] = no_fragment ? nil : depth_fragment;
     tex_t depth = {.magic = MAGIC('T','E','X',0), .serial = 8960 + (uint64_t)pass};
     depth.d.width = MR_W; depth.d.height = MR_H; depth.d.depth = depth.d.samples = depth.d.levels = 1; depth.d.target = NVN_TEXTURE_TARGET_2D; depth.d.format = NVN_FORMAT_DEPTH32F;
     uint8_t *mem; if (posix_memalign((void **)&mem, getpagesize(), 131072)) abort(); memset(mem, 0, 131072); mtl_pool_add(mem, 131072);
@@ -122,6 +125,10 @@ int main(int argc, char **argv) { @autoreleasepool {
     if ((r = run_case(@(argv[1]), 40, 1, 0)) <= 0 || failed) { if (!r) fprintf(stderr, "with counting on, the draws did not join runs\n"); return 1; }
     r = 0; for (int pass = 41; pass < 81 && !(r = run_case(@(argv[1]), pass, 0, 1)); pass++) usleep(100000);   // the fragment case's pipelines
     if (r <= 0 || failed) { if (!r) fprintf(stderr, "the fragment case's mesh pipelines were never ready\n"); return 1; }
+    // A depth prepass needs no fragment shader. It must retain the same culling,
+    // depth coverage, storage counters and sample queries through the lean path.
+    r = 0; for (int pass = 81; pass < 121 && !(r = run_case(@(argv[1]), pass, 1, 2)); pass++) usleep(100000);
+    if (r <= 0 || failed) { if (!r) fprintf(stderr, "depth-only geometry did not use the lean mesh path\n"); return 1; }
     {   // the log's compute-path line (mtl_geocomp_stats): the first passes drew while the mesh pipelines were built, the test pair's vertex and geometry keys among the most
         char gc[768]; uint64_t n = mtl_geocomp_stats(gc, sizeof gc); printf("geometry compute path: %s\n", gc);
         EXPECT("the compute path's draws are counted", 1, n > 0);
