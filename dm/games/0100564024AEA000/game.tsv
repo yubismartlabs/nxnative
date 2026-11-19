@@ -1,0 +1,43 @@
+# Wukong Black Legend profile, brought up on macOS from the 1.0.0 NSP.
+# Wukong Black Legend, SDK 20, survey /Volumes/OGT/Gaming/NXStudio/Wukong Black Legend/0100564024AEA000_survey/survey.md
+
+# ---- Identity ----
+title_id	0100564024AEA000
+program_id	0100564024AEA000
+
+# ---- App ----
+name	Wukong Black Legend
+ipa	WukongBlackLegend.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.0	main=c5b08250fb2273c950417d1403e961e5	subsdk0=3308c1d216f788397d1451c8345a16cd	sdk=5cf080e800530a7f25bd528ec875c27b
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	MonkeyKing/Content/Paks/MonkeyKing-Switch.ucas
+zip_store	.pak:.ucas:.utoc:.metallib
+
+# ---- Memory ----
+# the NPDM declares 20 MB of system resource (virtual address memory) and main never sets a heap: a 5 GB block with a 4.375 GB alias region, where the game maps its memory itself
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 20 MB of system resource
+sys_resource	0x1400000
+
+# ---- Shader split ----
+# the decoded shader code archives: the engine's global shaders and the game's material shaders
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_note	Wukong Black Legend shaders
+# One runtime-selected texture handle in vertex shader 1bcd6bca2360b49e indexes an NVN texture slot.
+tex_dyn_slots	on
+
+# ---- Address region check ----
+# the game calls nvnDeviceSetDepthMode with near = 0 in the check boot: the pipeline bases made before it runs are made for that mode
+depth_mode	zero
+

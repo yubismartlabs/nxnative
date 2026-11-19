@@ -238,6 +238,7 @@ These profiles are published for bring-up and are not yet confirmed playable.
 | Game | Title ID | Build | SDK | Engine | Graphics |
 |---|---|---|---|---|---|
 | [Wolfenstein II: The New Colossus](01009040091E0000/README.md) | `01009040091E0000` | 1.2 (v131072), gameplay pending | 4.4.0 | id Tech 6 | NVN |
+| [Wukong Black Legend](0100564024AEA000/README.md) | `0100564024AEA000` | 1.0.0, gameplay pending | 20.5.6 | Unreal Engine | NVN |
 
 ## Keys
 
