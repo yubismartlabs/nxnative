@@ -150,9 +150,9 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                         }
                     }
                 }
-                else if (leaf.AsgOp is Operation { Inst: Instruction.Load } || (IsPooled(texOp) && IsLoaded(leaf)))
+                else if (IsPooled(texOp) && IsLoaded(leaf))
                 {
-                    return TableHandle.None;   // a handle loaded from memory or an input is a real bindless access (GenerateBindlessAccess)
+                    return TableHandle.None;   // pooled reads can take loaded handles; c2 table candidates cannot replace that source
                 }
             }
 

@@ -5,10 +5,11 @@ Unreal Engine, NVN. Main build `c5b08250fb2273c950417d1403e961e5`.
 
 ## Status
 
-The NSP builds on the Mac and reaches the frame loop. Its startup log shows
-one vertex shader failing to load, which leaves its graphics program without
-a vertex shader. The profile fix is included; gameplay and the regenerated
-Metal library for that shader still need validation. iOS is untested.
+The NSP builds on the Mac and reaches the frame loop. Gameplay audio runs and
+the HUD appears over a black scene. The shader build reported three dropped
+texture-buffer reads in vertex shader `1bcd6bca2360b49e`. The translator now
+continues past unrelated loaded values to resolve the c2 table handle; rebuild
+the shader library before confirming the fix. iOS is untested.
 
 ## What it needs
 
@@ -28,10 +29,17 @@ slot at run time. Enabling `tex_dyn_slots` lets reflection and replay represent
 the slot-indexed texture and sampler arrays, allowing the host to load the
 shader. See [Texture slots picked at run time](../../../docs/reference/shaders.md#texture-slots-picked-at-run-time).
 
+## Gameplay scene fix
+
+The three dropped reads came from guarded handle values in the same vertex
+shader. During candidate scanning, the translator treated an unrelated loaded
+value as a real buffer-texture handle and stopped before reaching the valid c2
+table candidate. It now continues scanning buffer-texture phis for c2 handles.
+Rebuild the shader libraries to check the scene.
+
 ## Validation
 
-The existing Mac build compiled 5,275 shader libraries and completed pipeline
-prebuild. The host reached `nnMain` and presented over 1,300 frames. The log
-contains the missing vertex shader error above, so this does not establish
-that gameplay renders correctly. The profile change requires rebuilding the
-shader libraries before its effect can be confirmed.
+The earlier Mac build completed for 5,275 shaders and presented over 1,300
+frames, but its log reports three deleted reads and does not establish that
+gameplay renders correctly. The updated translator is in the chain; rebuild
+the shader libraries to validate the fix.
