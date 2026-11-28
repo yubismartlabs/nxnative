@@ -958,6 +958,8 @@ static void test_nvn_interop(void) {
     assert(NV_CALL(nvnQueueWaitSync)(&queue, &imported));
     NV_CALL(nvnSyncFinalize)(&imported);
     assert(NV_CALL(nvnSyncInitialize)(&nv_done, &device));
+    // Storm 4 finalizes its previous sync and fences the same storage before exporting it.
+    NV_CALL(nvnSyncFinalize)(&nv_done);
     NV_CALL(nvnQueueFenceSync)(&queue, &nv_done, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
     void *converted = NULL;
     assert(!((export_sync)nvn(NULL, "nvnSyncCreateGLSync"))(&nv_done, &converted) && converted);

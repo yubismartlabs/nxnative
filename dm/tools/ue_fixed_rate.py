@@ -4,10 +4,10 @@
 With bUseFixedFrameRate on, the engine steps every frame by exactly 1 / FixedFrameRate seconds and holds its tick to that rate, whatever rhi.SyncInterval and t.MaxFPS say
 (ue_cvar.py). DRAGON BALL: Sparking! ZERO (UE 5.1.1) and Pikmin 4 (UE 4.26.2) turn it on in their configs (bUseFixedFrameRate=True; 30, set by Sparking! ZERO's config and Unreal's
 Switch frame pace, main+0x1e1e904, and Pikmin 4's by the engine's default), so their gameplay stayed at 30 with the present interval raised. The value is the frame rate, so the game's speed
-holds at any rate, as far as the game's own code steps by the engine's delta time. Both links hold in any Unreal 4.22 to 5 build, each unique or nothing is written:
+holds at any rate, as far as the game's own code steps by the engine's delta time. The matcher finds each part from the engine's code and data:
 - the property's reflection entry: the data word holding the address of its UTF-8 name "FixedFrameRate" (the module's relative relocations applied; the linker may share the string with the
-  tail of "bUseFixedFrameRate"), whose generated-property kind is Float (0x0A at +24) and whose array size is 1 (+32). The offset follows the array size (+36, Unreal Engine 4.22 to 5.0:
-  Pikmin 4's 0x7a8) or, from Unreal Engine 5.1 on, a setter and a getter pointer after it (+56: Sparking! ZERO's 0x9c8);
+  tail of "bUseFixedFrameRate"), whose generated-property kind is Float (0x0A at +24) and whose array size is 1. In Pikmin 4 and Sparking! ZERO the size is at +32 and the offset
+  at +36 or +56. In the packed layout in Demon Slayer, two optional accessor pointers come first (+32 and +40), followed by the 16-bit array size and offset (+48 and +50);
 - GEngine, where FEngineLoop::Init makes the engine: it reads the engine class from the config key TEXT("GameEngine") (UTF-16; Sparking! ZERO's linker shares it with the tail of
   "UGameEngine"), makes the object and stores it into GEngine (str xV, [xR, #lo]), then loads it back and makes a virtual call on it (ParseCommandline: ldr x0, [xR, #lo], then a blr).
   xR is the global's page (adrp; Pikmin 4: main+0x9fbf000 + 0x880), that plus an offset (adrp + add), or the address a GOT slot holds (adrp + ldr; Sparking! ZERO: the slot main+0x8dbfb40
@@ -43,9 +43,14 @@ def fields(img, ro_off, data_off, rel):
     out = {}
     for o, v in rel.items():
         if v not in names or o < data_off or o + 64 > len(img): continue
-        kind, dim = img[o + 24], struct.unpack_from('<i', img, o + 32)[0]
-        if kind != FLOAT or dim != 1: continue
-        f = struct.unpack_from('<I', img, o + 36)[0] or struct.unpack_from('<I', img, o + 56)[0]   # UE 4.22-5.0, else UE 5.1+ (a setter and a getter before it)
+        if img[o + 24] != FLOAT: continue
+        if struct.unpack_from('<I', img, o + 32)[0] == 1:
+            f = struct.unpack_from('<I', img, o + 36)[0] or struct.unpack_from('<I', img, o + 56)[0]
+        else:
+            dim, f = struct.unpack_from('<HH', img, o + 48)
+            if dim != 1: continue
+            accessors = (rel.get(at, struct.unpack_from('<Q', img, at)[0]) for at in (o + 32, o + 40))
+            if any(p and (not 0 < p < ro_off or p % 4) for p in accessors): continue
         if f and f % 4 == 0 and f < 0x4000: out[o] = f
     return out
 

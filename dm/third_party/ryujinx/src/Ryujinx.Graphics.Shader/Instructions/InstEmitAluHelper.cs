@@ -9,14 +9,117 @@ namespace Ryujinx.Graphics.Shader.Instructions
 {
     static class InstEmitAluHelper
     {
+        // Try to resolve an FP32 operand to its constant 32-bit IEEE representation (handles Const, RZ, and Copy/FPAbs/FPNeg wrappers).
+        public static bool TryGetConstF32Bits(Operand v, out int bits)
+        {
+            for (int depth = 0; depth < 8 && v != null; depth++)
+            {
+                if (v.Type == OperandType.Constant)
+                {
+                    bits = v.Value;
+                    return true;
+                }
+                if (v.Type == OperandType.Register &&
+                    v.GetRegister() is { Type: RegisterType.Gpr, Index: RegisterConsts.RegisterZeroIndex })
+                {
+                    bits = 0;
+                    return true;
+                }
+                if (v is { Type: OperandType.LocalVariable, AsgOp: Operation op })
+                {
+                    if (op.Inst == Instruction.Copy)
+                    {
+                        v = op.GetSource(0);
+                        continue;
+                    }
+                    if (op.Inst == (Instruction.Absolute | Instruction.FP32) && TryGetConstF32Bits(op.GetSource(0), out int innerAbs))
+                    {
+                        bits = innerAbs & 0x7fffffff;
+                        return true;
+                    }
+                    if (op.Inst == (Instruction.Negate | Instruction.FP32) && TryGetConstF32Bits(op.GetSource(0), out int innerNeg))
+                    {
+                        bits = innerNeg ^ int.MinValue;
+                        return true;
+                    }
+                }
+                break;
+            }
+            bits = 0;
+            return false;
+        }
+
+        private static bool TryGetConstPred(Operand p, out bool value)
+        {
+            bool invert = false;
+            for (int depth = 0; depth < 8 && p != null; depth++)
+            {
+                if (p.Type == OperandType.Constant)
+                {
+                    value = (p.Value != 0) ^ invert;
+                    return true;
+                }
+                if (p.Type == OperandType.Register &&
+                    p.GetRegister() is { Type: RegisterType.Predicate or RegisterType.UniformPredicate, Index: RegisterConsts.PredicateTrueIndex })
+                {
+                    value = !invert;
+                    return true;
+                }
+                if (p is { Type: OperandType.LocalVariable, AsgOp: Operation op })
+                {
+                    if (op.Inst == Instruction.Copy)
+                    {
+                        p = op.GetSource(0);
+                        continue;
+                    }
+                    if (op.Inst == Instruction.BitwiseNot)
+                    {
+                        invert = !invert;
+                        p = op.GetSource(0);
+                        continue;
+                    }
+                }
+                break;
+            }
+            value = false;
+            return false;
+        }
+
+        public static bool IsNonZeroConstF32(Operand v) =>
+            TryGetConstF32Bits(v, out int bits) && (bits & 0x7fffffff) != 0;
+
+        public static bool IsNonNanConstF32(Operand v) =>
+            TryGetConstF32Bits(v, out int bits) && (bits & 0x7fffffff) <= 0x7f800000;
+
+        // A normal non-zero float (|c| >= FLT_MIN) or ±Inf: every denormal has the same ordering against c as 0.0, so FTZ on the other operand is a no-op.
+        public static bool IsNormalNonZeroConstF32(Operand v) =>
+            TryGetConstF32Bits(v, out int bits) && (bits & 0x7f800000) != 0 && (bits & 0x7fffffff) <= 0x7f800000;
+
         // nxnative: FMNMX and HMNMX2 order -0 below +0 whatever the operand order: min(+0, -0) is -0 and max(+0, -0) is +0. Metal's fmin and fmax may return
         // either zero. Where both operands are zeros, the minimum is their bits ORed (-0 if either is) and the maximum their bits ANDed (+0 unless both are -0).
         // The test is on the bits, so a NaN (never a zero) keeps fmin and fmax's own result and fast math, which assumes no signed zeros, cannot fold it away.
-        // Each instruction costs an OR, a shift, an integer compare and a select, plus an AND for the maximum; a constant predicate keeps one side.
+        // When either operand is a non-zero constant, bothZero is always false and the signed-zero tie-break is omitted; a constant predicate emits only one side.
         public static Operand FPMinMax(EmitterContext context, Operand isMin, Operand a, Operand b)
         {
+            bool hasConstPred = TryGetConstPred(isMin, out bool pickMin);
+            if (IsNonZeroConstF32(a) || IsNonZeroConstF32(b))
+            {
+                if (hasConstPred)
+                {
+                    return pickMin ? context.FPMinimum(a, b) : context.FPMaximum(a, b);
+                }
+                return context.ConditionalSelect(isMin, context.FPMinimum(a, b), context.FPMaximum(a, b));
+            }
+
             Operand or = context.BitwiseOr(a, b);
             Operand bothZero = context.ICompareEqual(context.ShiftLeft(or, Const(1)), Const(0));
+            if (hasConstPred)
+            {
+                return pickMin
+                    ? context.ConditionalSelect(bothZero, or, context.FPMinimum(a, b))
+                    : context.ConditionalSelect(bothZero, context.BitwiseAnd(a, b), context.FPMaximum(a, b));
+            }
+
             Operand min = context.ConditionalSelect(bothZero, or, context.FPMinimum(a, b));
             Operand max = context.ConditionalSelect(bothZero, context.BitwiseAnd(a, b), context.FPMaximum(a, b));
 
@@ -33,6 +136,19 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             return context.ConditionalSelect(context.FPCompareLess(context.FPAbsolute(v), ConstF(1.17549435e-38f)), ConstF(0), v);
+        }
+
+        // Flush denormals for an FP32 comparison: skip flushing one operand when the other is a normal non-zero constant (|c| >= FLT_MIN or ±Inf),
+        // because every denormal compares identically to 0.0 against c under all 16 IEEE/SASS comparison modes.
+        public static (Operand A, Operand B) FlushDenormalForCompare(EmitterContext context, Operand a, Operand b, bool ftz)
+        {
+            if (!ftz)
+            {
+                return (a, b);
+            }
+            Operand fa = IsNormalNonZeroConstF32(b) ? a : FlushDenormal(context, a);
+            Operand fb = IsNormalNonZeroConstF32(a) ? b : FlushDenormal(context, b);
+            return (fa, fb);
         }
 
         // Directed rounding of FADD, FMUL and FFMA (.RM, .RP, .RZ; RoundMode 1, 2, 3). Metal only rounds to nearest, so the instruction is computed to nearest (r), the exact error of r is

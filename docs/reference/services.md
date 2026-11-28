@@ -1124,6 +1124,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md).
 - **Check:** on the Mac `DM_KBD=<text> DM_TEST_SWKBD_HOLD_MS=8000` holds the keyboard up: frozen, 8.8 fps and 7,936 wakeups a second in that window; running, 30 fps and 1,788.
 
+### The software keyboard reads the SDK's work buffer
+
+- **Symptom:** `CRASH sig=11` in `swkbd_u16_to_u8` under `swkbd_show` when the player opens the world-name keyboard.
+- **Cause** — The host read the initial-text work-buffer pointer from `ShowKeyboardArg+0x4d0`. SDK 4.4.1 uses `+0x400`, as both `ShowKeyboard` (`sdk+0x1c9500`) and `SetInitialText` (`sdk+0x1c9df0`) show. In the crash the host added the correct text offset `0x14` to an unrelated word from beyond the old argument.
+- **Fix** — `hle_swkbd.c` reads the SDK 3–5 work-buffer field when there is initial text. The layout also appears in SDK 3.5.3 (Manual Samuel) and 5.5.0 (Cuphead). SDK 6.5.0 (Fire Emblem: Three Houses) already uses `+0x4d0`.
+- **Found on** — [Minecraft: Nintendo Switch Edition](../../dm/games/01006BD001E06000/README.md).
+- **Check** — `t_swkbd` passes an SDK 4 argument with initial text and checks that the applet presents the text and returns UTF-16 when requested.
+
 ### The inline keyboard as a resident library applet
 
 - **Symptom:** null read in `applet::CreateLibraryApplet` under `swkbd::InlineKeyboard::Initialize` (3D World, entering the save select after the character select).

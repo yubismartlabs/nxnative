@@ -382,6 +382,35 @@ class CompareFtz(Alu):
     def test_against_zero_flushes_one(self):
         self.assertEqual(self.kept((self.FSETP[0], 0x000000ff1300720b), self.FSEL, srcs=(19, 20)).count(self.FLUSH), 1)
 
+    def test_against_normal_nonzero_const_skips_ftz(self):
+        # FSETP.NEU.FTZ.AND P0, PT, R19, 1.0f, PT (form 4 imm32 = 0x3f800000): every denormal compares identically to 0.0 against 1.0
+        msl = self.kept((self.FSETP[0], 0x3f8000001300780b), self.FSEL, srcs=(19, 20))
+        self.assertNotIn(self.FLUSH, msl)
+        self.assertNotIn('isnan(', msl)
+
+    def test_unordered_compare_avoids_isnan(self):
+        # FSETP.NEU / FSETP.LTU lower to negated ordered comparisons instead of cmp || isnan(a) || isnan(b)
+        self.assertNotIn('isnan(', self.kept(self.FSETP, self.FSEL, srcs=(19, 20)))
+        ltu = ((self.FSETP[0] & ~(0xf << 12)) | (0x9 << 12), self.FSETP[1])
+        self.assertNotIn('isnan(', self.kept(ltu, self.FSEL, srcs=(19, 20)))
+
+
+class FmnmxConstZero(Alu):
+    """FMNMX signed-zero tie-break (<< 1 == 0) is omitted when either operand is a non-zero constant, and kept when both can be zero."""
+    FMNMX_IMM1 = (0x000fe20003800000, 0x3f80000013067809)   # FMNMX R6, R19, 1.0f, PT
+    FMNMX_RZ = (0x000fe20003800000, 0x000000ff13067209)     # FMNMX R6, R19, RZ, PT
+
+    def test_nonzero_const_skips_signed_zero_check(self):
+        msl = self.kept(self.FMNMX_IMM1, srcs=(19,))
+        self.assertIn('min(', msl)
+        self.assertNotIn('<< 1', msl)
+        self.assertNotIn('max(', msl)
+
+    def test_zero_operand_keeps_signed_zero_check(self):
+        msl = self.kept(self.FMNMX_RZ, srcs=(19,))
+        self.assertIn('<< 1', msl)
+        self.assertNotIn('max(', msl)
+
 
 class Vote(Alu):
     """VOTEU (0x886) writes the uniform predicate UPd and leaves the lane predicate of that number alone; VOTE (0x806) writes the lane predicate. nvdisasm reads 0x886 as

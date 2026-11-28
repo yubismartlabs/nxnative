@@ -14,6 +14,12 @@ On Apple M4 Pro with macOS 27.2.1 and Xcode 27.2 (27B52), the game rendered the 
 
 Press A at the title, dismiss each DLC notice with B, and select **New Game** and a portrait-display preference. In **Move-In Paperwork**, choose a look, fill the four fields, and press Plus to begin.
 
+## Frame rate
+
+The profile targets 60 fps. The shared Unity matcher finds `Application.targetFrameRate` and `QualitySettings.vSyncCount` through the internal-call table on both the cartridge base and update 1.5.0. On 1.5.0, the host changes them from 30 to 60 fps and from two vsyncs to one. `DM_FPS_TARGET=0` restores the game's original rate.
+
+On the Apple M4 Pro, at the title with no window and the same host and shader libraries, the game sustained 30.0 fps at its original limit and 60.0 fps with the target. Median frame time went from 33.33 ms to 16.66 ms, and steady CPU power samples went from about 0.58 W to 1.16 W. With the profile default in fullscreen on the same Mac, the title presented at 60.0 fps on a 120 Hz display, with 16.67 ms frame intervals in two consecutive 300-frame samples. The base game's settings were found offline.
+
 ## Found on this game
 
 - [The offline profanity filter's content version](../../../docs/reference/services.md#the-offline-profanity-filters-content-version) blocked both name fields. [Issue #3459](https://github.com/seedds/nxnative/issues/3459)

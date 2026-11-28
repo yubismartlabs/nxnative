@@ -4,6 +4,8 @@
 //   ShowKeyboard 0x3a6770 moves KeyboardConfig field by field into the applet arguments: +0x24 title u16[65], +0xa6 subtitle u16[129], +0x1a8 hint u16[257],
 //     +0x3ac maximum length, +0x3b0 minimum length, +0x3bd isUseUtf8, +0x3c0 offset of the initial text within the work buffer, +0x3c4 UTF-16 length of the initial text;
 //     work buffer pointer / size at +0x4d0 / +0x4d8 (handed to the applet together with CreateLargeStorage)
+//   SDK 3–5 use +0x400 / +0x408 (Minecraft SDK 4.4.1 ShowKeyboard at sdk+0x1c9500 and SetInitialText at sdk+0x1c9df0).
+//     Manual Samuel SDK 3.5.3 and Cuphead SDK 5.5.0 use the same fields. Three Houses SDK 6.5.0 uses +0x4d0 / +0x4d8.
 //   SetInitialTextUtf8 0x3a74c0: UTF-8 → UTF-16 written to work buffer+offset (offset 0x14, at most 500 characters + terminating 0)
 //   ReadCloseResultAndString 0x3a63f0: output storage = u32 CloseResult + text area; the text area is copied as is into String{+0 pointer, +8 capacity}, at most the capacity, which it only reads (Pikmin 4: sdk+0x39b7d0)
 //   ShowKeyboard wrap-up 0x3a6acc: CloseResult == 0 (OK) → Result 0, otherwise (cancel) → 0x29F; GetRequiredStringBufferSize = 0x7D4
@@ -15,7 +17,7 @@
 #include "front.h"
 
 enum { ARG_HEADER = 0x24, ARG_SUB = 0xa6, ARG_GUIDE = 0x1a8, ARG_MAXLEN = 0x3ac, ARG_MINLEN = 0x3b0, ARG_UTF8 = 0x3bd,
-       ARG_INIT_OFF = 0x3c0, ARG_INIT_LEN = 0x3c4, ARG_WORKBUF = 0x4d0,
+       ARG_INIT_OFF = 0x3c0, ARG_INIT_LEN = 0x3c4, ARG_WORKBUF_SDK3_5 = 0x400, ARG_WORKBUF = 0x4d0,
        HEADER_N = 65, SUB_N = 129, GUIDE_N = 257 };
 #define SWKBD_RESULT_CANCELED 0x29Fu   // swkbd module 159 / description 1: the constant the SDK returns when CloseResult != 0
 
@@ -67,8 +69,12 @@ Result swkbd_show(void *out, const void *arg_, swkbd_input_fn input) {
     swkbd_u16_to_u8((const uint16_t *)(arg + ARG_SUB), SUB_N, sub, sizeof sub);
     swkbd_u16_to_u8((const uint16_t *)(arg + ARG_GUIDE), GUIDE_N, guide, sizeof guide);
     int32_t maxlen, minlen, ilen, ioff; memcpy(&maxlen, arg + ARG_MAXLEN, 4); memcpy(&minlen, arg + ARG_MINLEN, 4); memcpy(&ilen, arg + ARG_INIT_LEN, 4); memcpy(&ioff, arg + ARG_INIT_OFF, 4);
-    const uint8_t *work; memcpy(&work, arg + ARG_WORKBUF, 8);
-    if (ilen > 0 && work) swkbd_u16_to_u8((const uint16_t *)(work + ioff), (size_t)ilen, init, sizeof init);
+    if (ilen > 0) {
+        int sdk = dm_sdk_major();
+        size_t work_offset = sdk >= 3 && sdk <= 5 ? ARG_WORKBUF_SDK3_5 : ARG_WORKBUF;
+        const uint8_t *work; memcpy(&work, arg + work_offset, sizeof work);
+        if (work) swkbd_u16_to_u8((const uint16_t *)(work + ioff), (size_t)ilen, init, sizeof init);
+    }
 
     const char *script = getenv("DM_KBD");
     // The guest clock keeps running while the keyboard is up, as on the Switch: the applet blocks the calling thread and the game's other threads go on in real time. d2r-mobile froze it here

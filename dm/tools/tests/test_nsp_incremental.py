@@ -249,6 +249,29 @@ class DeriveProfile(Base):
         nsp.derive_profile(g, self.pdir, 'v65536', self.ex, ['main'], shader_only=True)
         self.assertEqual(derived.table('shader_map.tsv').read_text(), 'generated DLC shader rows\n')
 
+    def test_shader_only_derivation_keeps_the_registered_gl_capture_list(self):
+        capture = self.src / 'gl_capture.tsv'
+        capture.write_text('0123456789abcdef.vert\n')
+        g = game.Game(self.src)
+        nsp.derive_profile(g, self.pdir, 'v65536', self.ex, ['main'], shader_only=True)
+        copied = self.pdir / capture.name
+        self.assertEqual(copied.read_text(), capture.read_text())
+
+        shader_map = self.pdir / 'shader_map.tsv'
+        shader_map.write_text('generated shader rows\n')
+        capture.write_text('fedcba9876543210.frag\n')
+        nsp.derive_profile(g, self.pdir, 'v65536', self.ex, ['main'], shader_only=True)
+        self.assertEqual(copied.read_text(), capture.read_text())
+
+        capture.unlink()
+        nsp.derive_profile(g, self.pdir, 'v65536', self.ex, ['main'], shader_only=True)
+        self.assertFalse(copied.exists())
+        self.assertEqual(shader_map.read_text(), 'generated shader rows\n')
+
+        capture.write_text('0123456789abcdef.vert\n')
+        self.derive()
+        self.assertFalse(copied.exists())
+
     def test_derived_main_without_frame_step_stubs_keeps_the_games_step(self):
         source = self.src / 'game.tsv'; source.write_text(source.read_text() + 'fps_target\t60\n')
         (self.src / 'patches.py').write_text(f'def frame_step(ctx): pass\nFRAME_STEP = {{"{BID}": frame_step}}\n')   # stubs for the registered main only, never run

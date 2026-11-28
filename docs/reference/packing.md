@@ -618,6 +618,14 @@
 - **Fix:** general, in the split (`merge_keys`): a key found in both the game and a DLC is the game's row, whatever the scan order; otherwise the first copy is kept, and two different copies of one key are still red. The game's rows are then the same with or without any DLC, and the derivation rule stays strict in both directions. The profiles with DLC rows were split again with their DLC: PRAGMATA's 45 shared shaders moved to the game's rows (no other change); Mario + Rabbids Sparks of Hope (7 DLC) and FINAL FANTASY X/X-2 HD Remaster (2) came out the same; Xenoblade Chronicles 2, split here with more DLC than its profile, derived a DLC-only profile with no game row changed. `test_split_dlc_shared` (the merge: the game's copy in either order; fails without the change) and `test_nsp_incremental` `DlcOnlyShaders` (both directions with a shared shader; a profile under the old crediting is refused).
 - **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md) v196608 from a NUP with no DLC, against a profile split with `re_dlc_000.pak`, which holds 45 of the game's shaders ([issue #2439](https://github.com/seedds/nxnative/issues/2439), diagnosed by its reporter and a commenter, both splits checked on their data).
 
+### A generated profile omits the OpenGL library from the app
+
+- **Symptom:** the Mac or iOS build reports that it translated the OpenGL shaders for an NVN game, but the installed app has no supplemental GL library and its OpenGL draws are missing.
+- **Cause:** the packer generates a working profile when the registered profile has no committed NVN shader map. That derivation copied the build and settings but dropped `gl_capture.tsv`. Both packers use the list to decide whether the game needs the GL library alongside its NVN shaders.
+- **Fix:** a shader-only derivation keeps the registered GL capture list. A derivation for another build still starts without it. Refreshing copied files updates or removes the list without discarding the generated NVN shader tables.
+- **Check:** `test_nsp_incremental` covers copying, updating, removing and excluding the list for another build.
+- **Found on:** [NARUTO SHIPPUDEN: ULTIMATE NINJA STORM 4 ROAD TO BORUTO 1.1.0](../../dm/games/01003F800CF5C000/README.md), during app packaging.
+
 ### A program of a multi-program game mounts the wrong DLC
 
 - **Symptom:** a program packed alone (`--program N`) or packed with its launcher (the launcher's profile names it in `programs`) mounts another DLC than the one it asks for, or none: the build prints `DLC index 0:` for the application's first DLC, the run reports one index fewer than the build extracted (`aoc: reporting 1 add-on contents {1}` for two DLC), `fs mount dlc:` names the wrong image, and the program can end at start (`nnMain returned`).

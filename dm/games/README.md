@@ -101,7 +101,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [DARK SOULS: REMASTERED](01004AB00A260000/README.md) | `01004AB00A260000` | 1.0.3 | 4.5.0 | FromSoftware's engine | NVN | [60 fps mode](01004AB00A260000/README.md#frame-rate) |
 | [DAVE THE DIVER](010097F018538000/README.md) | `010097F018538000` | 1.0.6.1267 | 20.5.29 | Unity 6000.0.52f1 IL2CPP, FMOD | NVN | — |
 | [Dead Cells](0100646009FBE000/README.md) | `0100646009FBE000` | 1.25.0 | 13.3.5 | Heaps / HashLink (HL/C) | NVN | — |
-| [Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2](0100AD80208A8000/README.md) | `0100AD80208A8000` | 2.01 | 20.5.17 | Unreal Engine 5, CRIWARE | NVN | — |
+| [Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2](0100AD80208A8000/README.md) | `0100AD80208A8000` | 2.01 | 20.5.17 | Unreal Engine 5, CRIWARE | NVN | [60 fps target](0100AD80208A8000/README.md#frame-rate) |
 | [Devil May Cry 3 Special Edition](01007B600D5BC000/README.md) | `01007B600D5BC000` | 1.0.1 | 8.2.0 | Capcom's DMC3 engine, FMOD | NVN | — |
 | [Diablo II: Resurrected](0100726014352000/README.md) | `0100726014352000` | 1.0.34.0 | 11.4.3 | Blizzard's D2R engine, FMOD | NVN | [60 fps mode](0100726014352000/README.md#what-it-needs) |
 | [Diablo III: Eternal Collection](01001B300B9BE000/README.md) | `01001B300B9BE000` | 2.7.7.92380 | 8.2.0 | Blizzard's engine, FMOD | NVN | — |
@@ -180,11 +180,13 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Metroid Prime Remastered](010012101468C000/README.md) | `010012101468C000` | 1.0.0 (base) | 12.3.1 | Retro Studios' engine | NVN | — |
 | [Minecraft Dungeons II](0100A7C01B792000/README.md) | `0100A7C01B792000` | 1.1.3.0 | 20.5.15 | Unreal Engine 5, Wwise, Havok | NVN | 60 fps target, [120 fps option](0100A7C01B792000/README.md#frame-rate) |
 | [Minecraft for Nintendo Switch](0100D71004694000/README.md) | `0100D71004694000` | 1.26.62 | 20.5.14 | RenderDragon, FMOD | Vulkan | — |
+| [Minecraft: Nintendo Switch Edition](01006BD001E06000/README.md) | `01006BD001E06000` | 1.0.17 | 4.4.1 | 4J Studios' engine | NVN | — |
 | [Monster Hunter Rise](0100B04011742000/README.md) | `0100B04011742000` | 16.0.2 | 11.4.3 | Capcom's RE Engine | NVN | 60 fps target |
 | [Monster Train 2](010051701FB46000/README.md) | `010051701FB46000` | 1.1.1 | 18.3.5 | Unity 2022.3.54f1 IL2CPP | NVN | [60 fps mode](010051701FB46000/README.md#frame-rate) |
 | [Mortal Kombat 1](01006560184E6000/README.md) | `01006560184E6000` | 1.29.0 | 15.3.2 | NetherRealm's Unreal Engine, Havok, Wwise | NVN | — |
 | [Mortal Kombat 11](0100F2200C984000/README.md) | `0100F2200C984000` | 1.0.26 | 9.3.1 | NetherRealm's Unreal Engine 3, Wwise, Havok | NVN | — |
 | [NARUTO SHIPPUDEN: Ultimate Ninja STORM 3 Full Burst](01006BB00800A000/README.md) | `01006BB00800A000` | 1.0.1 | 4.4.0 | CyberConnect2, CRIWARE | NVN | [60 fps in Mac VS Battle](01006BB00800A000/README.md#frame-rate) |
+| [NARUTO SHIPPUDEN: ULTIMATE NINJA STORM 4 ROAD TO BORUTO](01003F800CF5C000/README.md) | `01003F800CF5C000` | 1.1.0 | 8.2.1 | CyberConnect2, CRIWARE | NVN + OpenGL ES | [60 fps in Mac VS Battle](01003F800CF5C000/README.md#frame-rate) |
 | [NARUTO X BORUTO Ultimate Ninja STORM CONNECTIONS](0100D2D0190A4000/README.md) | `0100D2D0190A4000` | 1.7.1 | 14.3.0 | CyberConnect2, CRIWARE | NVN + OpenGL ES | [60 fps target](0100D2D0190A4000/README.md#frame-rate) |
 | [Need for Speed: Hot Pursuit Remastered](010029B0118E8000/README.md) | `010029B0118E8000` | 1.0.3 | 10.4.1 | Criterion's engine (Stellar Entertainment port) | NVN | 60 fps target |
 | [NieR:Automata The End of YoRHa Edition](010056B015FE8000/README.md) | `010056B015FE8000` | 1.0.3 | 12.3.9 | PlatinumGames' engine | NVN | 60 fps target |
@@ -259,7 +261,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [SteamWorld Heist: Ultimate Edition](010016100A186000/README.md) | `010016100A186000` | 2.2.1 | 4.5.0 | Image & Form's own engine (SteamWorld) | NVN | — |
 | [stitch.](010025801CEA8000/README.md) | `010025801CEA8000` | 1.2 | 21.4.4 | Unity 6000.0.68f1 IL2CPP, FMOD | NVN | [60 fps target](010025801CEA8000/README.md#frame-rate) |
 | [STORY OF SEASONS: Friends of Mineral Town](0100ED400EEC2000/README.md) | `0100ED400EEC2000` | 1.0.5 | 8.2.0 | — | NVN | — |
-| [STORY OF SEASONS: Grand Bazaar](0100DAE01E4C8000/README.md) | `0100DAE01E4C8000` | 1.5.0 | 18.3.5 | Unity 6000.0.28f1 IL2CPP, CRIWARE | NVN | — |
+| [STORY OF SEASONS: Grand Bazaar](0100DAE01E4C8000/README.md) | `0100DAE01E4C8000` | 1.5.0 | 18.3.5 | Unity 6000.0.28f1 IL2CPP, CRIWARE | NVN | [60 fps target](0100DAE01E4C8000/README.md#frame-rate) |
 | [Stray](010075101EF84000/README.md) | `010075101EF84000` | 1.6.0 | 17.5.6 | Unreal Engine 4.27.2, Bink | NVN | [60 fps target](010075101EF84000/README.md#frame-rate) |
 | [Streets of Rage 4](0100EC9010258000/README.md) | `0100EC9010258000` | 1.0.9 | 9.3.1 | MonoGame (C# → C++ by BRUTE) | NVN | — |
 | [Subnautica](0100429011144000/README.md) | `0100429011144000` | 1.23.83358 | 13.3.5 | Unity 2019.4.36f1 IL2CPP, FMOD | NVN | — |

@@ -127,6 +127,15 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
         // A global load GlobalToStorage served is a copy that keeps the load's storage kind, of its helper's result (or of 0 where it dropped the load): Copy.GlobalMemory(Call)
         private static bool IsLoaded(Operand leaf) => leaf.AsgOp is Operation op && (op.Inst is Instruction.Load or Instruction.Call || (op.Inst == Instruction.Copy && op.StorageKind != StorageKind.None));
 
+        // NVN embeds c[1] in the shader package. A dynamically indexed literal (such as a BRX jump offset) cannot supply a runtime texture handle.
+        private static bool IsShaderLiteralLoad(Operation load, ResourceManager resourceManager, IGpuAccessor gpuAccessor)
+        {
+            return load.StorageKind == StorageKind.ConstantBuffer &&
+                   gpuAccessor.QueryConstantBuffer1Size() > 0 &&
+                   load.GetSource(0) is { Type: OperandType.Constant } binding &&
+                   resourceManager.TryGetConstantBufferSlot(binding.Value, out int slot) && slot == 1;
+        }
+
         private static bool IsPooled(TextureOperation texOp) => texOp.Inst.IsImage() || (texOp.Type & SamplerType.Mask) != SamplerType.TextureBuffer;   // as GenerateBindlessAccess
 
         private static TableHandle TryTableHandle(BasicBlock block, ResourceManager resourceManager, IGpuAccessor gpuAccessor, TextureOperation texOp, LinkedListNode<INode> node, bool deferSeveral)
@@ -168,7 +177,8 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                         }
                     }
                 }
-                else if (leaf.AsgOp is Operation { Inst: Instruction.Load } || (IsPooled(texOp) && IsLoaded(leaf)))
+                else if (IsPooled(texOp) ? IsLoaded(leaf) :
+                    leaf.AsgOp is Operation { Inst: Instruction.Load } load && !IsShaderLiteralLoad(load, resourceManager, gpuAccessor))
                 {
                     return TableHandle.None;   // a handle loaded from memory or an input is a real bindless access (GenerateBindlessAccess)
                 }

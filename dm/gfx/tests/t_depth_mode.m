@@ -31,18 +31,22 @@ static int checks, failed;
 static NSString *capture_stderr(void (^block)(void)) {
     fflush(stderr);
     FILE *tmp = tmpfile();
-    if (!tmp) return @"";
+    if (!tmp) { perror("capture_stderr tmpfile"); exit(2); }
     int saved = dup(STDERR_FILENO);
-    dup2(fileno(tmp), STDERR_FILENO);
+    if (saved < 0 || dup2(fileno(tmp), STDERR_FILENO) < 0) { perror("capture_stderr redirect"); exit(2); }
     block();
     fflush(stderr);
-    dup2(saved, STDERR_FILENO);
+    if (dup2(saved, STDERR_FILENO) < 0) { perror("capture_stderr restore"); exit(2); }
     close(saved);
-    fseek(tmp, 0, SEEK_END);
-    long n = ftell(tmp);
-    rewind(tmp);
-    NSMutableData *data = [NSMutableData dataWithLength:n > 0 ? (NSUInteger)n : 0];
-    if (n > 0) (void)fread(data.mutableBytes, 1, (size_t)n, tmp);
+    long n = fseek(tmp, 0, SEEK_END) == 0 ? ftell(tmp) : -1;
+    if (n < 0 || fseek(tmp, 0, SEEK_SET) != 0) { perror("capture_stderr seek"); exit(2); }
+    if (n == 0) { fclose(tmp); return @""; }
+    NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)n];
+    void *bytes = data.mutableBytes;
+    if (!bytes || fread(bytes, 1, (size_t)n, tmp) != (size_t)n) {
+        fputs("capture_stderr: could not read captured output\n", stderr);
+        exit(2);
+    }
     fclose(tmp);
     return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"";
 }

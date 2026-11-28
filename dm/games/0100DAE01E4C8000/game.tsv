@@ -27,6 +27,10 @@ mem_stack	0x10000000
 app_pool	0xCD500000
 sys_resource	0x1000000
 
+# ---- Frame rate ----
+# The shared Unity matcher finds the frame settings in each build's internal calls.
+fps_target	60
+
 # ---- Graphics ----
 # The game selects near-zero depth before drawing. Prebuild pipelines with that mode.
 depth_mode	zero

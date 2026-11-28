@@ -300,7 +300,7 @@ static void cp_report(void) {
     uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     if (!g_cp_last) { g_cp_last = now; return; }
     if (now - g_cp_last < 5000000000ull) return;
-    static const char *names[] = {"pass_end", "pass_begin", "pipeline", "arguments", "texture", "draw", "geometry", "index"};
+    static const char *names[] = {"pass_end", "pass_begin", "pipeline", "arguments", "texture", "draw", "geometry_setup", "index"};
     char line[1000] = {0}; size_t at = 0;
     for (int i = 0; i < 8; i++) if (g_cp_calls[i]) {
         int n = snprintf(line + at, sizeof line - at, " %s %llu calls %.2f/%.2f ms CPU/wall;", names[i], (unsigned long long)g_cp_calls[i], g_cp_cpu[i] / 1e6, g_cp_wall[i] / 1e6);
@@ -17327,7 +17327,7 @@ static uint64_t htab_gpu(int stage, const nvn_rbind *b, __unsafe_unretained id<M
     if (p->ecap < need_e) { free(p->elems); p->elems = realloc_or_die(NULL, 8 * (size_t)need_e, "handle table elements"); p->ecap = need_e; }
     memcpy(p->elems, e, 8 * (size_t)need_e);
     if (metadata) {
-        if (p->lcap < need_e) { free(p->lead); p->lead = realloc_or_die(NULL, 4 * (size_t)need_e, "handle table leads"); p->lcap = need_e; }
+        if (!p->lead || p->lcap < need_e) { free(p->lead); p->lead = realloc_or_die(NULL, 4 * (size_t)need_e, "handle table leads"); p->lcap = need_e; }
         memcpy(p->lead, lead, metadata);
     }
     p->reg = rg; p->sgen = sg; p->pass = g_pass.serial; p->sub = g_sub_serial;

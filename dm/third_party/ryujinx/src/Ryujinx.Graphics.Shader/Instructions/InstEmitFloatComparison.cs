@@ -403,8 +403,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (ftz)
             {
-                srcA = FlushDenormal(context, srcA);
-                srcB = FlushDenormal(context, srcB);
+                (srcA, srcB) = FlushDenormalForCompare(context, srcA, srcB, ftz: true);
             }
 
             Operand res = GetFPComparison(context, cmpOp, srcA, srcB, fpType);
@@ -455,8 +454,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (ftz)
             {
-                srcA = FlushDenormal(context, srcA);
-                srcB = FlushDenormal(context, srcB);
+                (srcA, srcB) = FlushDenormalForCompare(context, srcA, srcB, ftz: true);
             }
 
             Operand p0Res = GetFPComparison(context, cmpOp, srcA, srcB, fpType);
@@ -542,6 +540,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
         private static Operand GetFPComparison(EmitterContext context, FComp cond, Operand srcA, Operand srcB, Instruction fpType = Instruction.FP32)
         {
             Operand res;
+            bool aNonNan = fpType == Instruction.FP32 && IsNonNanConstF32(srcA);
+            bool bNonNan = fpType == Instruction.FP32 && IsNonNanConstF32(srcB);
 
             if (cond == FComp.T)
             {
@@ -553,12 +553,42 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
             else if (cond is FComp.Nan or FComp.Num)
             {
-                res = context.BitwiseOr(context.IsNan(srcA, fpType), context.IsNan(srcB, fpType));
+                if (aNonNan && bNonNan)
+                {
+                    res = Const(IrConsts.False);
+                }
+                else if (aNonNan)
+                {
+                    res = context.IsNan(srcB, fpType);
+                }
+                else if (bNonNan)
+                {
+                    res = context.IsNan(srcA, fpType);
+                }
+                else
+                {
+                    res = context.BitwiseOr(context.IsNan(srcA, fpType), context.IsNan(srcB, fpType));
+                }
 
                 if (cond == FComp.Num)
                 {
                     res = context.BitwiseNot(res);
                 }
+            }
+            else if ((cond & FComp.Nan) != 0 && (cond & ~FComp.Nan) != FComp.Eq)
+            {
+                // nxnative: every unordered comparison except EQU is the exact IEEE negation of an ordered comparison
+                // (e.g. LTU === !(>=), NEU === !(==)), lowering to 1 compare instead of cmp || isnan(a) || isnan(b).
+                Instruction negatedOrdered = (cond & ~FComp.Nan) switch
+                {
+                    FComp.Lt => Instruction.CompareGreaterOrEqual,
+                    FComp.Le => Instruction.CompareGreater,
+                    FComp.Gt => Instruction.CompareLessOrEqual,
+                    FComp.Ne => Instruction.CompareEqual,
+                    FComp.Ge => Instruction.CompareLess,
+                    _ => throw new ArgumentException($"Unexpected condition \"{cond}\"."),
+                };
+                res = context.BitwiseNot(context.Add(negatedOrdered | fpType, Local(), srcA, srcB));
             }
             else
             {
@@ -576,8 +606,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                 if ((cond & FComp.Nan) != 0)
                 {
-                    res = context.BitwiseOr(res, context.IsNan(srcA, fpType));
-                    res = context.BitwiseOr(res, context.IsNan(srcB, fpType));
+                    if (!aNonNan)
+                    {
+                        res = context.BitwiseOr(res, context.IsNan(srcA, fpType));
+                    }
+                    if (!bNonNan)
+                    {
+                        res = context.BitwiseOr(res, context.IsNan(srcB, fpType));
+                    }
                 }
             }
 

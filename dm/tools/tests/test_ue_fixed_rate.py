@@ -1,5 +1,5 @@
 """Unreal's UEngine::FixedFrameRate and bUseFixedFrameRate found by their reflection entries and GEngine where FEngineLoop::Init makes the engine (dm/tools/ue_fixed_rate.py), on
-synthetic images, no game files: the offset after the array size (UE 4.22-5.0, Pikmin 4) and after a setter and a getter (UE 5.1+, DRAGON BALL: Sparking! ZERO), the name shared with
+synthetic images, no game files: Pikmin 4 and DRAGON BALL: Sparking! ZERO's layouts and Demon Slayer's packed 16-bit array size and offset, the name shared with
 bUseFixedFrameRate's tail, the flag from its set-bit function, GEngine as a page plus offset (Pikmin 4) and through a GOT slot (Sparking! ZERO, the key the tail of "UGameEngine"), a store
 with no reload or virtual call after it (not taken), two creations naming different globals (red), and an entry of another kind (not taken)."""
 import struct
@@ -49,6 +49,13 @@ def image(ue51=True, kind=ue_fixed_rate.FLOAT, creations=((GENGINE, False),), re
 def find(img): return ue_fixed_rate.find(bytes(img), TEXT, RO, DATA)
 
 
+def packed_image(dim=1, getter=0):
+    img = image()
+    struct.pack_into('<QQHH', img, ENTRY + 32, 0, getter, dim, FIELD)
+    struct.pack_into('<I', img, ENTRY + 56, 0)
+    return img
+
+
 class FindTest(unittest.TestCase):
     def test_ue51_layout_through_the_got_slot(self):   # Sparking! ZERO
         g, f, fl, why = find(image(creations=((GENGINE, True),), tail=True))
@@ -57,6 +64,17 @@ class FindTest(unittest.TestCase):
     def test_ue4_layout_page_and_offset(self):   # Pikmin 4: str x0, [x19, #0x880] with x19 the page
         g, f, fl, why = find(image(ue51=False))
         self.assertEqual((g, f, fl), (GENGINE, FIELD, 0x9c4 << 8 | 0x40), why)
+
+    def test_packed_layout_after_optional_accessors(self):
+        for getter in (0, SETBIT):
+            with self.subTest(getter=getter):
+                g, f, fl, why = find(packed_image(getter=getter))
+                self.assertEqual((g, f, fl), (GENGINE, FIELD, 0x9c4 << 8 | 0x40), why)
+
+    def test_packed_layout_requires_a_scalar_and_code_accessors(self):
+        for img in (packed_image(dim=2), packed_image(getter=RO)):
+            g, _, _, why = find(img)
+            self.assertIsNone(g, why)
 
     def test_two_creations_naming_one_global(self):
         g, f, fl, why = find(image(creations=((GENGINE, False), (GENGINE, True))))

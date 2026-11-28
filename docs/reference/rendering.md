@@ -2621,6 +2621,14 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Check:** `t_gl_imports` exercises two live contexts on different threads, share-group names, independent bindings, texture import and a GPU-gated GL → NVN → GL fence.
 - **Found on:** [NARUTO X BORUTO Ultimate Ninja STORM CONNECTIONS 1.7.1](../../dm/games/0100D2D0190A4000/README.md). [Related report for another regional build](https://github.com/seedds/nxnative/issues/2835).
 
+### An NVN sync fenced again exports a null GL fence
+
+- **Symptom:** the title background draws without its logo or button prompt. The GL renderer reports `GL_INVALID_VALUE` from `glWaitSync` on successive frames.
+- **Cause:** the game recycles two NVN sync slots. It finalizes the old sync, fences the same slot with `nvnQueueFenceSync`, and exports it with `nvnSyncCreateGLSync` (`main+0xacf1f0` and `main+0xacf210` on STORM 4 1.1.0). The queue fence stored the new receipt, but export still saw the invalid marker from finalization and handed GL a null sync.
+- **Fix:** `nvn_queue_fence` marks the sync valid when it installs the new fence, under the same lock. OpenGL waits on the NVN queue's actual Metal event.
+- **Check:** `t_gl_imports` finalizes the slot before fencing it again and verifies the resulting GL fence waits for GPU work. The Mac retest drew the title logo and prompt, and the `glWaitSync` errors were gone.
+- **Found on:** [NARUTO SHIPPUDEN: ULTIMATE NINJA STORM 4 ROAD TO BORUTO 1.1.0](../../dm/games/01003F800CF5C000/README.md), during the Mac title-screen test.
+
 ### An ES context reported as desktop OpenGL
 
 - **Symptom:** a crash in the guest allocator while following a link containing compressed texture bytes (`main+0xd472f4` on Naruto 1.7.1). An earlier row copy writes 2,048 bytes into a 32-byte allocation.

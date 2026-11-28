@@ -7,6 +7,7 @@ import tempfile
 import unittest
 import zlib
 from pathlib import Path
+from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
@@ -41,16 +42,11 @@ class KtglZl(unittest.TestCase):
         inner = b'PKTF ' + b'\x91\x68\x86\x19' + bytes(64)
         for name in ('ST010.pktf.ZL_', 'ST010.pktf.zl_'):
             with self.subTest(name=name):
-                seen = []
-                real = ss.glslc_shaders
-                ss.glslc_shaders = lambda d, label, need=True, skip=(): seen.append(bytes(d)) or []
-                try:
-                    with tempfile.TemporaryDirectory() as t:
-                        p = os.path.join(t, name)
-                        with open(p, 'wb') as f: f.write(zl(inner))
-                        ss.scan_file_in((p, f'STAGE/ST010/{name}'))
-                finally: ss.glslc_shaders = real
-                self.assertEqual(seen, [inner])
+                with patch.object(ss, 'glslc_shaders', return_value=[]) as glslc_shaders, tempfile.TemporaryDirectory() as t:
+                    p = os.path.join(t, name)
+                    with open(p, 'wb') as f: f.write(zl(inner))
+                    ss.scan_file_in((p, f'STAGE/ST010/{name}'))
+                self.assertEqual([bytes(call.args[0]) for call in glslc_shaders.call_args_list], [inner])
 
     def test_scan_leaves_malformed_size_uninflated(self):
         inner = b'PKTF ' + b'\x91\x68\x86\x19' + bytes(64)

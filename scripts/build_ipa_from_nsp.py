@@ -1168,7 +1168,8 @@ def write_profile(pdir, app, f, program_of=None):
 
 
 # ---- Derived profile (a version the game's profile was not brought up on) ----
-DERIVED_SKIP = {'game.tsv', 'shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv', 'geo_pairs.tsv', 'c1_full.tsv', 'cb_extent.tsv', 'vk_capture.tsv', 'gl_capture.tsv', 'patches.py'}   # made again from the packed version's own files (patches.py: the rewriter's patches of the registered builds)
+DERIVED_SHADER_TABLES = {'shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv', 'geo_pairs.tsv', 'c1_full.tsv', 'cb_extent.tsv'}
+DERIVED_SKIP = DERIVED_SHADER_TABLES | {'game.tsv', 'vk_capture.tsv', 'gl_capture.tsv', 'patches.py'}
 
 
 def derived_key(profile_dir):
@@ -1194,12 +1195,12 @@ def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False, *, nup_la
     main.npdm's program ID when app is not the profile's title. The shader tables, the chain header and the run-time capture list are
     left out: the build makes them again from this version's own files, as for a provisional profile. The hand-written tables (the prewarm list, shader_facts_manual.tsv) are copied:
     they name shaders by content key. A folder derived from the same inputs (the files copied and the game.tsv written, kept in <pdir>.derived.key) is kept as it is, with what later
-    stages wrote into it (the heap check, the region check, the split's tables), so their own reuse holds. shader_only preserves all registered game.tsv rows and links its existing cuts:
-    only the shader tables change with installed DLC or newly decoded compute kernels. The modules are the profile's that this version ships and those main imports from that the list leaves out. A profile with frame step stubs (FRAME_STEP) and no function-matched ones (MATCH_FRAME_STEP) for other builds only gets fps_target 0 for this version:
+    stages wrote into it (the heap check, the region check, the split's tables), so their own reuse holds. shader_only preserves the registered game.tsv rows, cuts and OpenGL capture list:
+    only the generated shader tables change. The modules are the profile's that this version ships and those main imports from that the list leaves out. A profile with frame step stubs (FRAME_STEP) and no function-matched ones (MATCH_FRAME_STEP) for other builds only gets fps_target 0 for this version:
     its main has no state page, so a cap of 30 or 60 would present every vsync while the game steps 1/30 s per frame (double speed). Returns the version's display version"""
     if pdir.resolve() == g.dir.resolve():   # the delete below would take the files the copy reads; main never takes this script's own profiles as registered ones (own_profile_folders)
         raise BuildError(f'game profile {g.id} would be derived onto its own folder {g.dir}')
-    src = sorted(p for p in g.dir.iterdir() if p.is_file() and (p.name not in DERIVED_SKIP or shader_only and p.name == 'patches.py'))
+    src = sorted(p for p in g.dir.iterdir() if p.is_file() and (p.name not in DERIVED_SKIP or shader_only and p.name in ('patches.py', 'gl_capture.tsv')))
     # The display version: the package's control data, else the one the profile registers for this main build. A NUP update or a dump carries no control data, and the game asks
     # the host for the version by its main's build ID (hle_sdk16.c GetDisplayVersion, the build rows): a row with ? is what the game then shows (Super Mario Bros. Wonder 1.2.1
     # from an update-only NUP: "Ver. ?" on its title screen, though the profile registers that build as 1.2.1). An unregistered NUP build can use its own numeric label.
@@ -1268,8 +1269,8 @@ def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False, *, nup_la
     why = 'no folder yet' if not (pdir / 'game.tsv').is_file() else 'game.tsv changed since' if not game_kept() else None
     if not why:
         if reused(kf, key) is not None: return disp
-        if reused(skf, skey) is not None:   # the tables later stages wrote (DERIVED_SKIP's names, but the patches.py link) stay
-            copy_in(lambda p: p.name in DERIVED_SKIP and p.name != 'patches.py')
+        if reused(skf, skey) is not None:   # keep generated shader tables and refresh copied profile files
+            copy_in(lambda p: p.name in DERIVED_SHADER_TABLES)
             say(f'derived profile {pdir}: copied files changed, the split\'s tables kept'); return disp
         why = 'no split key' if not skf.is_file() else 'the split\'s inputs changed'
     say(f'derived profile {pdir}: made again ({why})')

@@ -9,6 +9,9 @@ int front_text_input(const char *t, const char *s, const char *g, const char *i,
 static int fails, checks;
 #define CHECK(c, ...) do { checks++; if (!(c)) { fails++; printf("  ✗ "); printf(__VA_ARGS__); printf("\n"); } } while (0)
 
+static int sdk_major = 16;
+int dm_sdk_major(void) { return sdk_major; }
+
 // Input stub: record the arguments received and return as configured
 static const char *g_reply; static int g_ret, g_called; static char g_title[256], g_init[256]; static int g_max;
 static int stub(const char *t, const char *s, const char *g, const char *i, int m, char *o, int c) {
@@ -93,6 +96,17 @@ int main(void) {
     static const uint8_t w7[] = {'K', 'b', 'd', 0};
     CHECK(r == 0 && bytes_eq(w7, sizeof w7) && g_called == 0, "DM_KBD path differs (input box called %d times)", g_called);
     unsetenv("DM_KBD");
+
+    printf("8 SDK 4 keyboard uses the work buffer at +0x400\n");
+    sdk_major = 4;
+    mkarg(0, 16, hero, 4);
+    memcpy(arg + 0x400, arg + 0x4d0, sizeof(uint8_t *));
+    memset(arg + 0x4d0, 0, sizeof(uint8_t *));
+    g_ret = 1; g_reply = "World";
+    r = swkbd_show(&str, arg, stub);
+    static const uint8_t w8[] = {'W', 0, 'o', 0, 'r', 0, 'l', 0, 'd', 0, 0, 0};
+    CHECK(!strcmp(g_init, "Hero"), "SDK 4 initial text decoded as '%s', expected Hero", g_init);
+    CHECK(r == 0 && bytes_eq(w8, sizeof w8), "SDK 4 UTF-16 write-back bytes differ");
 
     printf("%s: %d/%d\n", fails ? "FAILED" : "all passed", checks - fails, checks);
     return fails != 0;

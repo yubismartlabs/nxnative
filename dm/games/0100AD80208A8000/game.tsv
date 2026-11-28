@@ -25,6 +25,9 @@ sys_resource	0x1000000
 shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
 shader_note	Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2 shaders
 
+# Unreal's reflected fixed frame rate and rhi.SyncInterval govern the engine step and presentation.
+fps_target	60
+
 # Use near-zero depth for offline pipelines. The vertex shaders select buffer textures through the c2 driver tables.
 depth_mode	zero
 tex_dyn_slots	on

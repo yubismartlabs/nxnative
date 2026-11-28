@@ -1,12 +1,12 @@
-"""Compute handles loaded through c0's uniform-address table must retain their uniform slot and word offsets. Synthetic Maxwell only: Civilization VI's four remaining compute
-shaders used this path, and lost 382 buffer fetches. The optional GPU check executes the translated fetch; t_tbuf_handle checks production binding of its two uniform words."""
+"""Synthetic Maxwell tests for buffer-texture handle provenance. Civilization VI's compute handles loaded through c0 must keep their uniform slot and offset.
+Demon Slayer's aura shaders merge an embedded c1 literal with a c2 handle. The optional GPU check executes the uniform-handle fetch."""
 import json, os, shutil, struct, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_dmsh_maxwell_ftz import EXIT, PT, RZ, TOOLS, code, s2r_tid   # noqa: E402
-from test_dmsh_storage_offset import iadd_c, ldg, mov_c   # noqa: E402
-from test_dmsh_hull_cbe import mov32i, stg   # noqa: E402
+from test_dmsh_maxwell_ftz import EXIT, PT, RZ, TOOLS, code, s2r_tid, sts   # noqa: E402
+from test_dmsh_storage_offset import iadd_c, ldg, mov_c, shl_i   # noqa: E402
+from test_dmsh_hull_cbe import isetp_ne, mov32i, stg   # noqa: E402
 sys.path.insert(0, str(TOOLS))
 import dmsh_abi as abi, dmsh_chain, dmsh_geometry, dmsh_reflect   # noqa: E402
 from dmsh_chain import MAC_METAL   # noqa: E402
@@ -129,6 +129,37 @@ class ComputeUniformHandles(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             _, _, binds = self.translate(Path(d), stage='vs', single=True)
             self.assertFalse(any(b['kind'] == abi.KIND_TBUF_UBO for b in binds), binds)
+
+    def test_literal_load_does_not_hide_a_guarded_c2_handle(self):
+        def if_p1(instruction):
+            return instruction & ~(0xf << 16) | 1 << 16
+
+        for bank, has_literals in ((1, True), (1, False), (3, True)):
+            with self.subTest(bank=bank, has_literals=has_literals), tempfile.TemporaryDirectory() as d:
+                work = Path(d)
+                # P0 = tid != 0 guards handle setup. The stricter P1 = tid > 1 guards the fetch,
+                # so the earlier LDC reaches the handle phi but cannot supply a handle to the fetch.
+                ldc = 0xef94000000070208 | bank << 36   # LDC R8, c[bank][R2]
+                skip_setup = 0xe24000000208000f        # @!P0 BRA +0x20
+                isetp_gt = 0x5b6903800037010f          # ISETP.GT.AND P1, PT, R1, R3, PT
+                blob = code(s2r_tid(1), shl_i(2, 1, 2), ldc, isetp_ne(1, RZ), skip_setup,
+                            mov_c(4, 2, 0x178), mov_c(5, 2, 0x568), lop_or(8, 4, 5),
+                            mov32i(3, 1), isetp_gt, if_p1(tld_b(10, 8)), if_p1(sts(10, 0)), EXIT)
+                (work / 'k.bin').write_bytes(blob)
+                job = dict(key='k', stage='cs', code=str(work / 'k.bin'), local=[32, 1, 1], shared=32,
+                           c1='00100000' * 32 if has_literals else '')
+                (work / 'jobs.json').write_text(json.dumps([job]))
+                r = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(work / 'jobs.json'), d], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                res = json.loads((work / 'k.res.json').read_text())
+                lost = any('Failed to find handle source' in note for note in res['notes'])
+                if bank == 1 and has_literals:
+                    self.assertFalse(lost, res['notes'])
+                    texture, = res['textures']
+                    self.assertEqual((texture['cbuf_slot'], texture['handle'], texture['array']), (0x30002, 0x1056805e, 1))
+                else:
+                    self.assertTrue(lost, res['notes'])
+                    self.assertEqual(res['textures'], [])
 
     @unittest.skipUnless(os.environ.get('DMSH_TEST_GPU') == '1' and shutil.which('xcrun'), 'set DMSH_TEST_GPU=1 on a Mac with Xcode')
     def test_translated_fetch_on_gpu(self):

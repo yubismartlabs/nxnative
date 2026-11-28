@@ -1,0 +1,33 @@
+# Minecraft: Nintendo Switch Edition 1.0.17 on SDK 4.4.1. See README.md and dm/games/README.md.
+
+# ---- Identity ----
+title_id	01006BD001E06000
+program_id	01006BD001E06000
+
+# ---- App ----
+name	Minecraft: Nintendo Switch Edition
+ipa	MinecraftNintendoSwitchEdition.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v1114112	1.0.17	main=5176e298cdd8222718da817b67f01dab	sdk=c232f796abd0e8859ece94c7f5fba59a
+package	v1114112
+shader_versions	v1114112
+
+# ---- Files ----
+modules	main sdk
+romfs_marker	Common/Media/MediaNX.arc
+zip_store	.arc:.binka:.mcs:.msscmp:.png:.ttf:.metallib
+
+# ---- Memory ----
+# The game requested a 3.14 GiB heap. The 4 GiB guest reservation gives it a 3.25 GiB heap region.
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# The NPDM declares no system resource. Horizon reports virtual address memory disabled for this program.
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/Common/=common /NX/=nx /music/=music
+shader_note	Minecraft: Nintendo Switch Edition shaders

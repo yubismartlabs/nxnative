@@ -1,0 +1,32 @@
+# NARUTO SHIPPUDEN: ULTIMATE NINJA STORM 4 ROAD TO BORUTO, SDK 8.2.1
+
+# ---- Identity ----
+title_id	01003F800CF5C000
+program_id	01003F800CF5C000
+
+# ---- App ----
+name	NARUTO SHIPPUDEN: ULTIMATE NINJA STORM 4 ROAD TO BORUTO
+ipa	NarutoShippudenUltimateNinjaStorm4RoadToBoruto.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v65536	1.1.0	main=d3016fc0c0402dfb70fba6b826ea772f	subsdk0=60c6edbbfcebd4176cc301d5d9cb5a6f	sdk=5fd4f531c1195e9e5510c9e73f22cd39
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+modules	main subsdk0 sdk
+romfs_marker	data/sim/stage2.cpk
+zip_store	.cache:.cpk:.nsh:.metallib
+
+# ---- Memory ----
+# The NPDM enables virtual address memory. The game requests a 2.03 GiB heap.
+mem_reserve	0x140000000
+mem_alias	0x98000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x2000000
+
+# ---- Shader split ----
+shader_groups	/data/=data
+shader_note	NARUTO SHIPPUDEN: ULTIMATE NINJA STORM 4 ROAD TO BORUTO shaders

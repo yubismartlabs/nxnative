@@ -536,6 +536,9 @@ int nvn_queue_present_gpu_wait_timeout(uint64_t ticket, uint64_t timeout_ns, int
 void nvn_queue_fence(queue_t *q,sync_t *s) {
     pthread_mutex_lock(&nq_mu); nq_queue *p=nq_get(q);
     if(p->tail) nq_set_sync(s,p->tail); else { nq_release_sync_locked(s); s->fenced=1; s->fence=p->physical; }
+    // A new queue fence replaces the previous sync state. Storm 4 finalizes
+    // the old state before fencing and exporting the same slot to OpenGL.
+    s->magic = MAGIC('S', 'Y', 'N', 'C');
     pthread_mutex_unlock(&nq_mu);
 }
 int nvn_sync_wait(const sync_t *s,uint64_t timeout) {

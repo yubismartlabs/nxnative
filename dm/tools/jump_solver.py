@@ -28,7 +28,7 @@ those numbers unknown, so that each table's size is what its guards allow howeve
 solve() returns {br address: targets} for every dispatch it proves and {br address: reason} for the others."""
 import struct
 from functools import lru_cache
-from typing import Any
+from typing import Any, Literal
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM, CS_GRP_JUMP, CS_GRP_CALL, CS_GRP_RET, CS_GRP_INT
 from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_REG, ARM64_OP_MEM, ARM64_EXT_UXTW, ARM64_EXT_SXTW, ARM64_EXT_INVALID, ARM64_EXT_UXTX, ARM64_EXT_SXTX, ARM64_SFT_LSL
 
@@ -437,17 +437,20 @@ class Ins:
         if self._control is None: self._control = any(self.p.group(g) for g in (CS_GRP_JUMP, CS_GRP_CALL, CS_GRP_RET, CS_GRP_INT))
         return self._control
 
+_CValue = tuple[Literal['o', 'arg_any']] | tuple[Literal['csp'], int] | tuple[Literal['arg'], int, int]
+
+
 class _CState:
     """Abstract state inside a summarized callee: regs[0..30] hold ('o',), ('csp', off), ('arg', r, off), or ('arg_any',);
     frame is bytes allocated below entry sp (or None if unknown); slots maps fixed 8-byte offsets in [0, frame) holding a caller pointer."""
     __slots__ = ('regs', 'frame', 'slots', 'escaped')
-    def __init__(self, regs, frame=0, slots=None, escaped=False):
+    def __init__(self, regs: list[_CValue], frame: int | None = 0, slots: dict[int, tuple[int, _CValue]] | None = None, escaped=False):
         self.regs, self.frame, self.slots, self.escaped = regs, frame, {} if slots is None else slots, escaped
     def copy(self): return _CState(list(self.regs), self.frame, dict(self.slots), self.escaped)
     def key(self): return (tuple(self.regs), self.frame, tuple(sorted(self.slots.items())), self.escaped)
 
 
-def _cjoin_val(x, y, frame):
+def _cjoin_val(x: _CValue, y: _CValue, frame: int | None) -> _CValue:
     if x == y: return ('arg_any',) if x[0] == 'csp' and frame is None else x
     return ('arg_any',)
 
@@ -546,7 +549,7 @@ class CalleeAnalyzer:
         return True
 
     @staticmethod
-    def _cjoin(a, b):
+    def _cjoin(a: _CState, b: _CState):
         frame = a.frame if a.frame == b.frame else None
         escaped = a.escaped or b.escaped or frame is None or any((x[0] == 'csp' or y[0] == 'csp') and x != y for x, y in zip(a.regs, b.regs))
         regs = [_cjoin_val(x, y, frame) for x, y in zip(a.regs, b.regs)]
@@ -603,7 +606,7 @@ class CalleeAnalyzer:
         if self._plt_import(target) in SAFE_NO_PTR_IMPORTS: return ((), {})
         if not self.code_ok(target) or target in active: return None
         active = active | {target}
-        init_regs = [('arg', r, 0) if r in exact else (('arg_any',) if r in any_ else ('o',)) for r in range(31)]
+        init_regs: list[_CValue] = [('arg', r, 0) if r in exact else (('arg_any',) if r in any_ else ('o',)) for r in range(31)]
         states: dict[int, _CState] = {target: _CState(init_regs)}
         work = [target]
         seen_insns: set[int] = set()
@@ -772,7 +775,7 @@ class CalleeAnalyzer:
             if r not in (None, 'zr'): st.regs[r[0]] = ('o',)
         return True
 
-    def _step_mem(self, st, p, m, ops, mem_idx, writes):
+    def _step_mem(self, st: _CState, p, m, ops, mem_idx, writes):
         mo = ops[mem_idx]; base_name = p.reg_name(mo.mem.base); has_idx = bool(mo.mem.index); disp = mo.mem.disp
         base_is_sp = base_name in ('sp', 'wsp')
         base_r = None if base_is_sp else _name(base_name)
@@ -828,7 +831,7 @@ class CalleeAnalyzer:
                         if r not in (None, 'zr'): st.regs[r[0]] = ('o',)
             else:
                 if p.writeback and base_r not in (None, 'zr') and wb_val is not None:
-                    loaded = {_reg(p, op)[0] for op in ops[:mem_idx] if _reg(p, op) not in (None, 'zr')}
+                    loaded = {r[0] for op in ops[:mem_idx] if (r := _reg(p, op)) not in (None, 'zr')}
                     if base_r[0] in loaded: return False
                 for name in p.writes():
                     r = _name(name)
