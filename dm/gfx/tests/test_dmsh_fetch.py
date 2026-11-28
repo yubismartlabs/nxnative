@@ -97,6 +97,90 @@ fragment main0_out main0(main0_in in [[stage_in]], constant spvDescriptorSetBuff
 '''
 BINDINGS = [{'kind': dmsh_abi.KIND_TEX, 'msl_name': 'fp_t_tcb_8', 'reg': 0}]
 FS_KEY = 'fedcba9876543210'
+# A sample at a screen-derived UV that the static proof cannot follow (Xenoblade Chronicles: Definitive Edition's decals project through emulated round-toward-zero products):
+# auto-detected as a 'tiled' call without bf_want.tsv; non-screen computed UVs still require om_only_ok (bf_want.tsv); every tiled sample of one slot shares its call
+FS_TILED = FS.replace('float _67 = 1.0 / _57;', 'float _67 = 2.0 / _57;')
+TILED_KEY = 'fedcba9876543213'
+FS_NON_SCREEN = FS.replace(
+    '    float _57 = in.m_35.w;\n    float _59 = in.m_35.x;\n    float _61 = in.m_35.y;\n    float _67 = 1.0 / _57;\n    float _69 = _59 * _67;\n    float _71 = _61 * _67;\n',
+    '    float _59 = in.m_35.x;\n    float _61 = in.m_35.y;\n    float _69 = _59 * 2.0 + 0.5;\n    float _71 = _61 * 2.0 + 0.5;\n',
+)
+FS_RTZ_PROJ = FS.replace(
+    '    float _69 = _59 * _67;\n    float _71 = _61 * _67;\n',
+    '    uint _100 = as_type<uint>(_67) & 2147483647u;\n'
+    '    bool _101 = _100 < 8388608u;\n'
+    '    uint _102 = as_type<uint>(_67) & 2147483648u;\n'
+    '    float _103 = as_type<float>(_101 ? _102 : as_type<uint>(_67));\n'
+    '    float _104 = _59 * _103;\n'
+    '    uint _105 = as_type<uint>(_104) - 1u;\n'
+    '    bool _106 = _100 != 0u;\n'
+    '    float _69 = as_type<float>(_106 ? _105 : as_type<uint>(_104));\n'
+    '    float _107 = _61 * _103;\n'
+    '    uint _108 = as_type<uint>(_107) - 1u;\n'
+    '    float _71 = as_type<float>(_106 ? _108 : as_type<uint>(_107));\n',
+)
+
+
+class TiledSample(unittest.TestCase):
+    def test_auto_detected_for_rtz_and_screen_uvs(self):
+        for why, src in (
+            ('emulated RTZ projective decal', FS_RTZ_PROJ),
+            ('scaled reciprocal projective', FS_TILED),
+            ('gl_FragCoord with offset', FS_POS.replace('float2 _286 = float2(_55, _57);', 'float _58 = _55 + 0.5;\n    float2 _286 = float2(_58, _57);')),
+        ):
+            with self.subTest(why=why):
+                v, meta = dmsh_fetch.fold(src, BINDINGS)
+                self.assertIsNotNone(v, meta)
+                self.assertEqual(meta['calls'], [{'fc': 0, 'tex_reg': 0, 'tiled': 1}])
+                self.assertIn('(fx0 == 0 ? fb0 : ', v)
+
+    def test_non_screen_uv_refused_without_flag_and_accepted_with_flag(self):
+        self.assertEqual(dmsh_fetch.fold(FS_NON_SCREEN, BINDINGS), (None, 'no rewritable sample'))
+        v, meta = dmsh_fetch.fold(FS_NON_SCREEN, BINDINGS, om_only_ok=True)
+        self.assertEqual(meta['calls'], [{'fc': 0, 'tex_reg': 0, 'tiled': 1}])
+        self.assertIn('(fx0 == 0 ? fb0 : ', v)
+
+    def test_dither_only_fragcoord_does_not_taint_mesh_uv(self):
+        dither = FS_NON_SCREEN.replace(
+            '    float _59 = in.m_35.x;\n',
+            '    float _43 = gl_FragCoord.x;\n    float _49 = gl_FragCoord.y;\n    bool _44 = (_43 + _49) > 1.0;\n    float _59 = _44 ? in.m_35.x : 0.25;\n',
+        )
+        self.assertEqual(dmsh_fetch.fold(dither, BINDINGS), (None, 'no rewritable sample'))
+
+    def test_samples_of_one_slot_share_a_call(self):
+        sample = 'float4 _84 = spvDescriptorSet0.fp_t_tcb_8.sample(spvDescriptorSet0.fp_t_tcb_8Smplr, select(_309, float2(0.0), isnan(_309))).xyzw;'
+        src = FS_TILED.replace(sample, sample + '\n    ' + sample.replace('_84', '_85')).replace('_84.x, 1.0', '_85.x, 1.0')
+        v, meta = dmsh_fetch.fold(src, BINDINGS)
+        self.assertEqual(meta['calls'], [{'fc': 0, 'tex_reg': 0, 'tiled': 1}])
+        self.assertEqual(v.count('(fx0 == 0 ? fb0 : '), 2)
+        self.assertEqual(meta['mixed_regs'], [])
+
+    def test_tiled_prioritized_above_32_plain_uv_slots(self):
+        extra_decls = ''.join(f'    texture2d<float> t_{k} [[id({2 + 2 * k})]];\n    sampler t_{k}Smplr [[id({3 + 2 * k})]];\n' for k in range(33))
+        extra_samples = '    float _900 = in.m_35.x;\n    float _901 = in.m_35.y;\n    float2 _902 = float2(_900, _901);\n' + ''.join(
+            f'    float4 _{910 + k} = spvDescriptorSet0.t_{k}.sample(spvDescriptorSet0.t_{k}Smplr, select(_902, float2(0.0), isnan(_902))).xyzw;\n' for k in range(33)
+        )
+        src = FS_RTZ_PROJ.replace('    sampler fp_t_tcb_8Smplr [[id(1)]];\n', '    sampler fp_t_tcb_8Smplr [[id(1)]];\n' + extra_decls).replace(
+            '    float _57 = in.m_35.w;\n', extra_samples + '    float _57 = in.m_35.w;\n'
+        )
+        bindings = BINDINGS + [{'kind': dmsh_abi.KIND_TEX, 'msl_name': f't_{k}', 'reg': k + 1} for k in range(33)]
+        v, meta = dmsh_fetch.fold(src, bindings)
+        self.assertIsNotNone(v, meta)
+        self.assertEqual(len(meta['calls']), 32)
+        self.assertEqual(meta['calls'][0], {'fc': 0, 'tex_reg': 0, 'tiled': 1})
+        self.assertEqual(meta['mixed_regs'], [32, 33])
+
+    def test_five_outputs(self):
+        outs = ''.join(f'    float4 m_{50 + j} [[color({j})]];\n' for j in range(1, 5))
+        src = FS_RTZ_PROJ.replace('    float4 m_46 [[color(0)]];\n', '    float4 m_46 [[color(0)]];\n' + outs)
+        v, meta = dmsh_fetch.fold(src, BINDINGS)
+        self.assertEqual([o['color'] for o in meta['outputs']], [0, 1, 2, 3, 4])
+        self.assertEqual(meta['calls'], [{'fc': 0, 'tex_reg': 0, 'tiled': 1}])
+        with tempfile.TemporaryDirectory() as d:
+            for sdk in ('macosx', 'iphoneos'):
+                with self.subTest(sdk=sdk):
+                    try: compile_lib(v, pathlib.Path(d), 'fs_tiled_' + sdk, sdk)
+                    except subprocess.CalledProcessError as e: self.fail(e.stderr)
 # Splatoon Raiders' ink stamp (6a5b76a60670e513), cut down: its ink map sampled at gl_FragCoord over the render scale times c[6].xy (1 / the map's size), through the border colour
 # correction; the read's channels rotated into its output (red from green, green from blue plus one minus alpha): red where it read green, black where it read red, and green
 # wherever a missing channel of an R or RG map read other than 0, 0, 1
@@ -199,11 +283,14 @@ class ProjectiveSample(unittest.TestCase):
         self.assertIn('static __attribute__((always_inline)) main0_out dm_body_main0(', v)
 
     def test_not_rewritten(self):
-        for why, src in (('a name assigned twice', FS.replace('    float2 _309', '    _69 = 0.5;\n    float2 _309')),
-                         ('w from another output', FS.replace('float _57 = in.m_35.w;', 'float _57 = in.m_35.z;')),
-                         ('x from another output', FS.replace('float4 m_35 [[user(locn4)]];', 'float4 m_35 [[user(locn4)]];\n    float4 m_36 [[user(locn5)]];').replace('float _59 = in.m_35.x;', 'float _59 = in.m_36.x;')),
-                         ('not divided by w', FS.replace('float _67 = 1.0 / _57;', 'float _67 = 2.0 / _57;'))):
-            with self.subTest(why=why): self.assertEqual(self.calls(src), 'no rewritable sample')
+        for why, src, want in (('a name assigned twice', FS.replace('    float2 _309', '    _69 = 0.5;\n    float2 _309'), 'no rewritable sample'),
+                               ('w from another output', FS.replace('float _57 = in.m_35.w;', 'float _57 = in.m_35.z;'), 'no rewritable sample'),
+                               ('x from another output', FS.replace('float4 m_35 [[user(locn4)]];', 'float4 m_35 [[user(locn4)]];\n    float4 m_36 [[user(locn5)]];').replace('float _59 = in.m_35.x;', 'float _59 = in.m_36.x;'), [{'fc': 0, 'tex_reg': 0, 'tiled': 1}]),
+                               ('not divided by w', FS.replace('float _67 = 1.0 / _57;', 'float _67 = 2.0 / _57;'), [{'fc': 0, 'tex_reg': 0, 'tiled': 1}])):
+            with self.subTest(why=why):
+                got = self.calls(src)
+                self.assertEqual(got, want)
+                if isinstance(got, list): self.assertFalse(any(c.get('proj') for c in got))
 
     def test_compiles_on_both_platforms(self):
         v, _ = dmsh_fetch.fold(FS, BINDINGS)
@@ -227,13 +314,17 @@ class PixelPositionSample(unittest.TestCase):
         self.assertEqual(self.calls(src)[0]['frag_pos'], [[0, 6, 0], [0, 6, 1]])
 
     def test_not_rewritten(self):
-        for why, src in (('y from x', FS_POS.replace('float _49 = gl_FragCoord.y;', 'float _49 = gl_FragCoord.x;')),
-                         ('divided by a uniform', FS_POS.replace('float _45 = (*spvDescriptorSet0.support_buffer)._m5[0].x;', 'float _45 = (*spvDescriptorSet0.fp_c3)._m0[1].x;')),
-                         ('a constant scale', FS_POS.replace('_47 * (*spvDescriptorSet0.fp_c3)._m0[6].x', '_47 * 0.25')),
-                         ('a driver constant bank', FS_POS.replace('(*spvDescriptorSet0.fp_c3)._m0[6].x', '(*spvDescriptorSet0.fp_c2)._m0[6].x')),
-                         ('an offset', FS_POS.replace('float2 _286 = float2(_55, _57);', 'float _58 = _55 + 0.5;\n    float2 _286 = float2(_58, _57);')),
-                         ('a name assigned twice', FS_POS.replace('    float2 _286', '    _55 = 0.5;\n    float2 _286'))):
-            with self.subTest(why=why): self.assertEqual(self.calls(src), 'no rewritable sample')
+        tiled = [{'fc': 0, 'tex_reg': 0, 'tiled': 1}]
+        for why, src, want in (('y from x', FS_POS.replace('float _49 = gl_FragCoord.y;', 'float _49 = gl_FragCoord.x;'), 'no rewritable sample'),
+                               ('divided by a uniform', FS_POS.replace('float _45 = (*spvDescriptorSet0.support_buffer)._m5[0].x;', 'float _45 = (*spvDescriptorSet0.fp_c3)._m0[1].x;'), tiled),
+                               ('a constant scale', FS_POS.replace('_47 * (*spvDescriptorSet0.fp_c3)._m0[6].x', '_47 * 0.25'), tiled),
+                               ('a driver constant bank', FS_POS.replace('(*spvDescriptorSet0.fp_c3)._m0[6].x', '(*spvDescriptorSet0.fp_c2)._m0[6].x'), tiled),
+                               ('an offset', FS_POS.replace('float2 _286 = float2(_55, _57);', 'float _58 = _55 + 0.5;\n    float2 _286 = float2(_58, _57);'), tiled),
+                               ('a name assigned twice', FS_POS.replace('    float2 _286', '    _55 = 0.5;\n    float2 _286'), 'no rewritable sample')):
+            with self.subTest(why=why):
+                got = self.calls(src)
+                self.assertEqual(got, want)
+                if isinstance(got, list): self.assertFalse(any('frag_pos' in c for c in got))
 
     def test_compiles_on_both_platforms(self):
         v, _ = dmsh_fetch.fold(FS_POS, BINDINGS)
@@ -394,9 +485,10 @@ class OtherEntryPoints(unittest.TestCase):
 
 def fixture(out):
     out = pathlib.Path(out); out.mkdir(parents=True, exist_ok=True)
-    (out / 'fb_vs.metal').write_text(VS); (out / 'fb_fs.metal').write_text(FS); (out / 'fb_pos.metal').write_text(FS_POS)
-    for src, key, name, facts, om in ((FS, FS_KEY, 'v', 'facts.json', False), (FS_POS, POS_KEY, 'vp', 'pos.json', False), (FS_OM, OM_KEY, 'vom', 'om.json', True)):
-        v, meta = dmsh_fetch.fold(src, BINDINGS if not om else [], om_only_ok=om)
+    (out / 'fb_vs.metal').write_text(VS); (out / 'fb_fs.metal').write_text(FS); (out / 'fb_pos.metal').write_text(FS_POS); (out / 'fb_tiled.metal').write_text(FS_TILED)
+    for src, key, name, facts, om, bind in ((FS, FS_KEY, 'v', 'facts.json', False, BINDINGS), (FS_POS, POS_KEY, 'vp', 'pos.json', False, BINDINGS),
+                                            (FS_OM, OM_KEY, 'vom', 'om.json', True, []), (FS_TILED, TILED_KEY, 'vt', 'tiled.json', False, BINDINGS)):
+        v, meta = dmsh_fetch.fold(src, bind, om_only_ok=om)
         tile_library(v, out, name)[-1].rename(out / f'{key}_bf.metallib')
         (out / facts).write_text(json.dumps({**({'screen': dmsh_fetch.screen_varyings(VS)} if src is FS else {}), 'calls': meta['calls'], 'outputs': meta['outputs']}))
 

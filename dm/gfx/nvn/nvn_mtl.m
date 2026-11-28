@@ -2240,8 +2240,9 @@ static uint64_t spare_trim(int all, unsigned *n_out);
 static void movie_kept_flush(void);
 static void movie_trim(int all);
 static unsigned g_evict_why[5];   // the last trim's packages (pkg_evict_idle): considered, used within PKG_IDLE_DS, of a kind not freed (sparse, placed, a view), GPU-written, held (pin, sharing table, takeover)
+static int g_fb_tiled_bar;   // the last fragment-ordering barrier in this pass's target sequence had ORDER_FRAGMENTS_TILED without ORDER_FRAGMENTS or ORDER_PRIMITIVES (fb_tile_plan 'tiled' calls)
 void mtl_sub_begin(void) {
-    mtl_init(); g_sub_serial++; g_seg = 0; g_vis_need = 1;   // until its first samples-passed reset or report (vis_need_scan)
+    mtl_init(); g_sub_serial++; g_seg = 0; g_vis_need = 1; g_fb_tiled_bar = 0;   // until its first samples-passed reset or report (vis_need_scan)
     treg_sparse_notes();   // the mappings made before this submission
     { void nvn_shadow_sync(void); nvn_shadow_sync(); }   // CPU writes behind per-run shadowed sparse mappings, before any texture or shader read of this submission
     if (g_pkg_kept) { g_pkg_kept = 0; nvn_dirty_touch(); } seg_clk_put(g_sclk); g_sclk = NULL;
@@ -11208,7 +11209,7 @@ static inline void state_restore_caches(void) {
 }
 static int g_state_inited;
 static void state_reset(void) {
-    g_rc_skip=0;
+    g_rc_skip=0; g_fb_tiled_bar = 0;
     g_state_inited = 1;
     memset(&S, 0, sizeof S);
     g_pso_dirty = g_dss_dirty = 1; state_restore_caches();
@@ -11274,7 +11275,7 @@ static void queue_program_preserve(void) {
 void mtl_queue_activate(uint64_t serial) {   // caller holds the submission lock
     if (g_active_queue && g_active_queue->serial == serial) return;
     // Another NVN queue's work begins here: the relaxed end barrier of the last draw pass (DM_NVN_BARRIER=game) orders only that queue's own next pass (up to its nvnCommandBufferBarrier bits); another queue's work after an event or sync wait must see all prior writes, vertex and indirect fetch included.
-    g_last_end_relaxed = 0;
+    g_last_end_relaxed = 0; g_fb_tiled_bar = 0;
     if (g_active_queue) { g_active_queue->s = S; g_active_queue->r = R; g_active_queue->rc_skip=g_rc_skip; }
     queue_state *q = g_queue_states;
     while (q && q->serial != serial) q = q->next;
@@ -19491,9 +19492,23 @@ static inline void sh_lists(NvShader *sh) { if (__builtin_expect(__atomic_load_n
 static inline int sh_tex_list(NvShader *sh, const uint8_t **l) { sh_lists(sh); *l = sh->tex_idx; return sh->tex_n; }
 static inline int sh_buf_list(NvShader *sh, const uint8_t **l) { sh_lists(sh); *l = sh->buf_idx; return sh->buf_n; }
 // The texture slots (bit per slot 0-255) whose attachment this draw reads from the tile; 0 = none (then g_fb_tfn and the rest are not this draw's)
+// The game's last fragment-ordering barrier in this target sequence had ORDER_FRAGMENTS_TILED without ORDER_FRAGMENTS or ORDER_PRIMITIVES: by NVN's contract, later fragments
+// read earlier results only at their own position, so a sample of an attachment that the chain could not prove is this pixel's ('tiled' fetch calls, for shaders bf_want.tsv lists)
+// is read from the tile. Xenoblade Chronicles: Definitive Edition's ground and character blend decals (7c3deb5ce82631c6, 2fb171bd248a8982 and others) put 0x14
+// (ORDER_FRAGMENTS_TILED | INVALIDATE_TEXTURE) before each draw that samples the 5-target G-buffer it writes, and their screen position comes from a projection the chain cannot
+// follow. DM_NVN_FB_TILED=0 turns it off; ab alternates with DM_AB
+static int g_fb_tiled_mode = -1;
+static int fb_tiled_on(void) {
+    if (g_fb_tiled_mode < 0) {
+        g_fb_tiled_mode = sw_mode("DM_NVN_FB_TILED", 1);
+        if (!g_fb_tiled_mode) MLOG("DM_NVN_FB_TILED=0: samples after a tiled barrier that the chain could not prove read a snapshot");
+    }
+    return sw_on(g_fb_tiled_mode);
+}
 static int fb_tile_plan(NvProg *pr, uint32_t wm, uint64_t tile[4]) {
     __unsafe_unretained NvShader *vs = pr->sh[0], *fs = pr->sh[1]; memset(tile, 0, 4 * sizeof *tile);   // the program holds them (no retain and release a draw)
-    if (g_fb_mode != 1 || !vs || !(fs->rf.fc_proj | fs->rf.fc_fpos) || !fs->rf.color_known || !fs->rf.nfo || !fb_tile_on()) return 0;
+    int tiled_ok = g_fb_tiled_bar && fb_tiled_on() && !pr->sh[2] && !pr->sh[3] && !pr->sh[4];
+    if (g_fb_mode != 1 || !vs || !fs->rf.nfc || (!(fs->rf.fc_proj | fs->rf.fc_fpos) && !tiled_ok) || !fs->rf.color_known || !fs->rf.nfo || !fb_tile_on()) return 0;
     fb_pinfo pi; int learn = 0;
     if (g_enc) { fb_pinfo_now(&pi); if (g_sm_pass) return 0; }
     else {   // the draw opens its pass: the formats learned for this program on these targets (fb_early_after)
@@ -19521,7 +19536,12 @@ static int fb_tile_plan(NvProg *pr, uint32_t wm, uint64_t tile[4]) {
                 || !sw_tile(t)
                 || MAX(base.width >> lv, 1ul) != W || MAX(base.height >> lv, 1ul) != H || (fs->rf.fc_mixed[b->reg >> 6] >> (b->reg & 63) & 1)) break;
             int any = 0, ok = 1;
-            for (int c = 0; c < fs->rf.nfc; c++) if (fs->rf.fc_reg[c] == b->reg) { if (fs->rf.fc_fpos >> c & 1 ? fpos_proof(fs, c, W, H) : fs->rf.fc_proj >> c & 1 && scr_proof(pr, fs->rf.fc_locn[c], W, H)) any = 1; else ok = 0; }
+            for (int c = 0; c < fs->rf.nfc; c++) if (fs->rf.fc_reg[c] == b->reg) {
+                int c_ok = (fs->rf.fc_fpos >> c & 1) ? (fpos_proof(fs, c, W, H) || tiled_ok)
+                         : (fs->rf.fc_proj >> c & 1) ? (scr_proof(pr, fs->rf.fc_locn[c], W, H) || tiled_ok)
+                         : tiled_ok;   // fc_tiled or plain varying_locn: read from tile only under ORDER_FRAGMENTS_TILED
+                if (c_ok) any = 1; else ok = 0;
+            }
             if (!ok || !any) break;
             for (int c = 0; c < fs->rf.nfc; c++) if (fs->rf.fc_reg[c] == b->reg) fx[c] = k;
             fbmask |= (uint8_t)(1u << k); tile[b->reg >> 6] |= 1ull << (b->reg & 63);
@@ -20216,6 +20236,11 @@ static __attribute__((noinline)) void fb_prepare_slow(__unsafe_unretained NvProg
                 MLOG("same-pass feedback sampling: snapshot #%llu, %llu draws reused one, %llu read the tile (%llu waited for their pipeline), %llu passes ended before a write to an attachment read directly (frame %llu pass %llu, shader %s %s %d samples attachment %d ser=%llu %lux%lu format %lu)", (unsigned long long)g_fb_count, (unsigned long long)g_fb_reuse, (unsigned long long)g_fb_tile_draws, (unsigned long long)g_fb_tile_wait, (unsigned long long)g_fb_split,
                      (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass + !g_enc, fs->key, texu ? "handle in uniform slot" : image ? "image slot" : "slot", b->reg, k, (unsigned long long)ser, (unsigned long)w, (unsigned long)h, (unsigned long)base.pixelFormat);
             PD("N %llu same-pass feedback sampling: attachment %d ser=%llu level %d layer %d copied into a snapshot; this draw samples the snapshot", g_stat_pass + !g_enc, k, (unsigned long long)ser, lv, sl);
+            if (g_fb_tiled_bar && !image && !texu) {
+                int has_call = 0;
+                for (int c = 0; c < fs->rf.nfc; c++) has_call |= fs->rf.fc_reg[c] == b->reg;
+                if (!has_call) bf_want_note(fs->key);   // a tile read after the tiled barrier once bf_want.tsv lists it (DM_NVN_BF_WANT)
+            }
         } }
     if (!fbc_hit) { if (fbc_keepable) fbc_keep(fs, fgen, rt_cmask); else g_fbsc.fs = NULL; }
     g_fb_wmask |= wm; g_fb_dwrote |= dsw;
@@ -24437,17 +24462,18 @@ void mtl_exec(const uint8_t *p) {
                     if (same) { static int nw; if (nw++ < 8) MLOG("same targets, no continuation: enc_mode=%d pend=%d rtc=%d pass %llu", g_enc_mode, pend, rtc_on(), g_stat_pass); }
                 }
                 if (g_enc && g_sm_pass && !pend && !g_game_barrier) { int sl;   // another layer of the slice-merged pass's level (sm_scan planned it)
-                    if (sm_rt_slice(&R.rt, r, &sl) && sl >= g_sm_lo && sl <= g_sm_hi) { R.rt = *r; g_sm_cur = sl; g_sm_ncont++;
+                    if (sm_rt_slice(&R.rt, r, &sl) && sl >= g_sm_lo && sl <= g_sm_hi) { R.rt = *r; g_sm_cur = sl; g_sm_ncont++; g_fb_tiled_bar = 0;
                         { void td_note_layer(id<MTLTexture>, uint64_t, NSUInteger, NSUInteger);
                           for (int k = 0; k < r->n && k < 8 && r->color[k]; k++)
                               td_note_layer(tex_mtl_replay(r->color[k]), r->color[k]->serial, r->cview[k].set_levels ? r->cview[k].base_level : 0, (NSUInteger)sl); }
                         PD("M %llu slice-merged pass goes on in layer %d", g_stat_pass, sl); break; } }
                 if (pend && !g_enc && g_cb && lc_on()) lc_push(); else rp_flush();   // clears with no draw wait for the next pass that attaches their targets (lc_push)
-                sub_cut(); R.rt = *r; R.has_rt = 1; break;
+                g_fb_tiled_bar = 0; sub_cut(); R.rt = *r; R.has_rt = 1; break;
             }
             case OP_CLEAR_COLOR: {
                 const p_clear_color *c = a;
                 if (g_rc_skip) { PD("c %llu color clear skipped by conditional rendering slot%d", g_stat_pass, c->index); break; }
+                g_fb_tiled_bar = 0;
                 // A scissored clear to 0 outside a pass with all channels (SMBW clears pyramid levels as sub-rectangles of 480×272 and other targets): copy from the zero buffer into the scissor rectangle in the replay stream
                 if (!g_enc && c->mask == 0xf && !c->rgba[0] && !c->rgba[1] && !c->rgba[2] && !c->rgba[3] && R.has_sc && c->index >= 0 && c->index < R.rt.n && R.rt.color[c->index]
                     && !scissor_full(R.rt.color[c->index], &R.rt.cview[c->index], R.rt.has_cview[c->index]) && clear_rect_zero(c->index)) break;
@@ -24465,6 +24491,7 @@ void mtl_exec(const uint8_t *p) {
             case OP_CLEAR_DS: {
                 const p_clear_ds *c = a;
                 if (g_rc_skip) { PD("c %llu depth-stencil clear skipped by conditional rendering", g_stat_pass); break; }
+                g_fb_tiled_bar = 0;
                 if (g_rt_merged || g_sm_pass || g_fsp_pass) rp_end();
                 // A load-action clear covers the whole attachment and every stencil bit. A clear whose scissor does not cover the depth target, or whose stencil mask is partial, is drawn as a triangle
                 // (clear_ds_tri), in or before a pass: before the first draw and for a partial stencil mask in a pass it used to clear the whole target (PR #108)
@@ -24526,22 +24553,23 @@ void mtl_exec(const uint8_t *p) {
                 state_op(h.op, a); tf_state_gpu(b); break; }
             case OP_PRIM_RESTART: state_op(h.op, a); break;
             case OP_RAST_DISCARD: PD("Y rasterizer discard %d", ((const p_rast_discard *)a)->on); state_op(h.op, a); break;
-            case OP_COPY_B2T: copy_b2t(a, h.size); break;
-            case OP_COPY_T2B: copy_t2b(a, h.size); break;
-            case OP_COPY_T2T: copy_t2t(a); break;
-            case OP_DRAW_TEX: draw_tex(a); break;
+            case OP_COPY_B2T: g_fb_tiled_bar = 0; copy_b2t(a, h.size); break;
+            case OP_COPY_T2B: g_fb_tiled_bar = 0; copy_t2b(a, h.size); break;
+            case OP_COPY_T2T: g_fb_tiled_bar = 0; copy_t2t(a); break;
+            case OP_DRAW_TEX: g_fb_tiled_bar = 0; draw_tex(a); break;
             case OP_CLEAR_TEX: {
+                g_fb_tiled_bar = 0;
                 const uint8_t *next = clear_tex_batch(p);
                 if (next != p) { p = next; continue; }
                 clear_tex(a);
                 break; }
-            case OP_DLSS: dlss_eval(a); break;
+            case OP_DLSS: g_fb_tiled_bar = 0; dlss_eval(a); break;
             case OP_AS_BUILD: as_exec_build(a); break;
             case OP_AS_COPY: as_exec_copy(a); break;
             case OP_BIND_AS: as_exec_bind(a); break;
-            case OP_RT_DISPATCH: dispatch_rays(a); break;
+            case OP_RT_DISPATCH: g_fb_tiled_bar = 0; dispatch_rays(a); break;
             case OP_DISPATCH: if (g_csh_n && csh_take(p)) { PD("H %llu dispatch already run ahead of the pass", g_stat_pass); break; }
-                dispatch(a); break;
+                g_fb_tiled_bar = 0; dispatch(a); break;
             case OP_BARRIER: { int32_t bits; memcpy(&bits, a, 4);   // ordered at the next draw pass (barrier_game); inside a pass with shader writes, the pass ends first (swrite_note); in one without, before its next write (prog_swrites)
                 int order = g_enc && (bits & (NVN_BARRIER_ORDER_PRIMITIVES_BIT | NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT));
                 int split = g_enc && g_pass_swrite && (order || (bits & NVN_BARRIER_ORDER_INDIRECT_DATA_BIT));
@@ -24562,6 +24590,8 @@ void mtl_exec(const uint8_t *p) {
                 else if (order) g_pass_order |= (bits & NVN_BARRIER_ORDER_PRIMITIVES_BIT ? 1 : 0) | (bits & (NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT) ? 2 : 0);
                 if (g_tf_enc && (bits & (NVN_BARRIER_ORDER_PRIMITIVES_BIT | NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT))) g_tf_bar = 1;   // the next capture of the open capture pass waits for its earlier ones (tf_order)
                 if ((bits & GAME_BARRIER_FULL) && g_mdx_wr != ~0ull && g_mdx_wr != g_vbuf_write_epoch) g_mdx_epoch++;   // a draw may have written a record or count that was copied before it (g_mdx_wr)
+                if (bits & (NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_PRIMITIVES_BIT)) g_fb_tiled_bar = 0;   // full fragment/primitive barrier permits cross-pixel reads
+                else if (bits & NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT) g_fb_tiled_bar = 1;   // fb_tile_plan's 'tiled' calls
                 if (bits) { g_game_barrier |= bits; g_fb_bar++; g_dsp_game_bar = 1; } break; }   // g_fb_bar: snapshots taken before it are stale (see fb_prepare)
             case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: state_op(h.op, a); break;
             default: break;
@@ -26101,11 +26131,11 @@ static double link_gpu_lead(uint64_t frame, double t_in, double cb, double wk_cb
 // Once per frame the display-link callback takes (its thread): cb the callback's time, age how long the frame waited in the queue (both seconds), dropped whether older
 // frames were merged away on this tick, lead, gpu_lead and room the frame's CPU present and GPU completion after the callback that woke its acquire and that callback's room
 // (nvn_link_latch_spare; room 0 when the latch does not run for it, gpu_lead < 0 when GPU timing is unavailable). Asks the next acquire for the ticks the queued frames have
-// to spare (g_link_drain_req). Not with present snapshots, which run the game a frame ahead on purpose, and not on the 120 Hz link: there the system already shows presents
-// late in variable-refresh fullscreen (link_vrr_120) with the queue's slack in place, and a drain there is unmeasured
+// to spare (g_link_drain_req). Not with present snapshots, which run the game a frame ahead on purpose. On the 120 Hz link the late latch stays off (room 0), so only
+// genuinely standing ticks (age >= 1/120 s + LINK_DRAIN_MARGIN) are drained, preserving the normal ~6.8 ms queue slack while clearing standing frames after startup or hitches
 static void link_drain_note(double cb, double age, int dropped, double lead, double gpu_lead, double room) {
     if (!link_drain_on()) return;
-    int rate = mtl_link_rate(), ok = !dropped && rate != 120 && !mtl_snap_on();
+    int rate = mtl_link_rate(), ok = !dropped && !mtl_snap_on();
     int k = nvn_link_drain_next(&g_link_drain, cb, age, 1.0 / rate, atomic_load(&g_link_blocked_ns) / 1e9, ok, lead, gpu_lead, room);
     if (k) atomic_store(&g_link_drain_req, k);
     if (k & LINK_DRAIN_LATCH) g_link_latch_misses = 0;   // its early frames show the presents come in time again: the end of the drain latches whatever the give-up said
@@ -26152,8 +26182,7 @@ static struct timespec link_deadline(uint64_t ns);
     // finds the queue full waits for this callback, and the wait is bounded). Not with present snapshots, which run the game a frame ahead of the screen on purpose.
     // Only into an empty queue: a frame that stands (one that missed the previous tick) goes out first, in order as without the latch, until a drain (link_drain_note) lets
     // the queue run empty again. Taking the latched present over it dropped that frame: about 3 a second on a built-in ProMotion screen, where presents came late more often
-    // Only on the 60 Hz link, where it was measured. Not on the 120 Hz link: there a 60 fps acquire waits two ticks (the drain does not run there
-    // either). Not on the 30 Hz power-saving link (a 30 fps target in variable-refresh fullscreen), which has not been measured with it
+    // Only on the 60 Hz link, where it was measured. Not on the 120 Hz link (where plain standing-frame drains run with room 0) and not on the 30 Hz power-saving link
     const int latch = link_latch_on() && rate == 60 && !mtl_snap_on();
     const double room = latch ? update.targetTimestamp - cb : 0;   // read only with the latch: the update's targetTimestamp is all it needs it for
     static uint64_t woken_n; if (woke) woken_n++;   // woken callbacks: the probe counts these, whatever ticks the acquire waits

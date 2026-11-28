@@ -185,6 +185,61 @@ def screen_varyings(msl):
     for e in entries: got &= _entry_screen(e.group(1), locn)
     return sorted(got)
 
+_DECL_OR_ASSIGN = re.compile(r'^(?:(?:float[234]?|half[234]?|int[234]?|uint[234]?)\s+)?(_\d+)\s*=\s*(.+);$')
+_FLOAT2 = re.compile(r'^float2\(\s*(_\d+)\s*,\s*(_\d+)\s*\)$')
+_DIV_DEN = re.compile(r'/\s*(_\d+|in\.m_\d+\.w)\b')
+_FCOORD = re.compile(r'\bgl_FragCoord\.([xyzw]+)\b')
+_VAR_REF = re.compile(r'\b_\d+\b')
+
+
+def _screen_uv_vars(text):
+    """Variables in main0's body whose 2D value is derived from screen-space coordinates: either both gl_FragCoord.x and gl_FragCoord.y, or both components projected by a
+    reciprocal of an interpolated varying's .w (including through emulated round-toward-zero products, FTZ flushes, fma, clamps, or uniform scales/offsets). A single forward
+    pass over statements; bool declarations are skipped so screen-space dither/branch tests never taint unrelated mesh UVs. Used to emit 'tiled' fetch calls automatically
+    without per-game bf_want.tsv opt-in (nvn_mtl.m fb_tile_plan reads them from the tile only after ORDER_FRAGMENTS_TILED)."""
+    if 'gl_FragCoord.' not in text and '/' not in text: return set()
+    # text starts with dm_body_main0's own '{', so start depth at -1 to put top-level body statements at depth 0
+    var_w, taint, depth = set(), {}, -1   # taint bits: 1 = gl_FragCoord.x, 2 = gl_FragCoord.y, 4 = varying .w reciprocal, 8 = confirmed 2D screen UV
+    for raw in text.splitlines():
+        s = raw.strip()
+        if not s: continue
+        if s == '{': depth += 1; continue
+        if s == '}': depth -= 1; continue
+        if s.startswith('bool '): continue
+        m = _DECL_OR_ASSIGN.match(s)
+        if not m: continue
+        lhs, rhs = m.group(1), m.group(2)
+        refs = _VAR_REF.findall(rhs)
+        if re.fullmatch(r'in\.m_\d+\.w', rhs):
+            var_w.add(lhs)
+        elif var_w and any(v in var_w for v in refs) and not any(op in rhs for op in ('*', '+', '-', '/', 'sqrt', 'rsqrt')):
+            var_w.add(lhs)
+        elif depth == 0:
+            var_w.discard(lhs)
+        t = 0
+        f2 = _FLOAT2.match(rhs)
+        if f2:
+            ta, tb = taint.get(f2.group(1), 0), taint.get(f2.group(2), 0)
+            if (ta & 3) and (tb & 3) and ((ta | tb) & 3) == 3: t |= 8
+            if (ta & 4) and (tb & 4): t |= 8
+        else:
+            if 'gl_FragCoord.' in rhs:
+                for fm in _FCOORD.finditer(rhs):
+                    sw = fm.group(1)
+                    if 'x' in sw and 'y' in sw: t |= 8
+                    elif 'x' in sw: t |= 1
+                    elif 'y' in sw: t |= 2
+            if '/' in rhs:
+                for dm in _DIV_DEN.finditer(rhs):
+                    den = dm.group(1)
+                    if den in var_w or den.endswith('.w'): t |= 4
+            for v in refs:
+                t |= taint.get(v, 0)
+        if t: taint[lhs] = (taint.get(lhs, 0) | t) if depth else t
+        elif depth == 0: taint.pop(lhs, None)
+    return {k for k, v in taint.items() if v & 8}
+
+
 def fold(msl, bindings, om_only_ok=False):
     """The readable-tile version main0_f added to msl (a pixel shader's source, or the compile unit dmsh_side.unit made of it), to be cut from the one compile of the shader's other entry
     points (dmsh_build.py ps_libraries); it was a source and a compile of its own. main0's body is dm_body_main0 (dmsh_side.shared_body), and each rewritable sample in it becomes
@@ -204,33 +259,49 @@ def fold(msl, bindings, om_only_ok=False):
     # A sample the border colour correction wrapped (dmsh_rewrite.py border_emu) is taken whole: a tile read replaces the corrected sample, never feeds the correction
     pat = re.compile(r'(dm_bs\()?spvDescriptorSet0\.(\w+)\.sample\(spvDescriptorSet0\.(\w+)Smplr, select\((_\d+), float2\(0\.0\), isnan\(\4\)\)\)'
                      r'(?(1), spvDescriptorSet0\.%s, \d+u, spvDescriptorSet0\.\2, spvDescriptorSet0\.\3Smplr%s, select\(\4, float2\(0\.0\), isnan\(\4\)\)\))' % (abi.BORDER_MEMBER, abi.BORDER_TWIN))
-    calls, out_parts, pos = [], [], 0
+    screen_uv = _screen_uv_vars(text)
+    raw = []   # (match, tex_reg, how, prio, share_key); prio 0 = proj/frag_pos/tiled before prio 1 = plain varying_locn so G-buffer reads never lose to 32+ mesh UV textures
     for m in pat.finditer(text):
         member, var = m.group(2), m.group(4)
         if member not in tex or member != m.group(3) or member not in reg: continue
         d = re.search(r'float2 %s = float2\((_\d+), (_\d+)\);' % var, text)
         a = d and re.search(r'float %s = in\.(m_\d+)\.x;' % d.group(1), text); b = d and re.search(r'float %s = in\.(m_\d+)\.y;' % d.group(2), text)
-        if a and b and a.group(1) == b.group(1) and a.group(1) in locn: how = {'varying_locn': locn[a.group(1)]}
+        if a and b and a.group(1) == b.group(1) and a.group(1) in locn:
+            how, prio, sk = {'varying_locn': locn[a.group(1)]}, 1, ('uv', locn[a.group(1)])
         else:
             pa, pb = (_proj(text, d.group(1), 'x', locn), _proj(text, d.group(2), 'y', locn)) if d else (None, None)
             fx, fy = (_frag_pos(text, d.group(1), 'x'), _frag_pos(text, d.group(2), 'y')) if d else (None, None)
-            if pa and pa == pb: how = {'varying_locn': locn[pa], 'proj': 1}
-            elif fx and fy: how = {'frag_pos': [fx, fy]}
+            if pa and pa == pb: how, prio, sk = {'varying_locn': locn[pa], 'proj': 1}, 0, ('proj', locn[pa])
+            elif fx and fy: how, prio, sk = {'frag_pos': [fx, fy]}, 0, ('fpos', tuple(map(tuple, [fx, fy])))
+            # Screen-derived UV that the static proof cannot follow (emulated round-toward-zero products, viewport offsets, arbitrary gl_FragCoord or projective math),
+            # or a shader explicitly listed in bf_want.tsv: read from the tile only after an ORDER_FRAGMENTS_TILED barrier (nvn_mtl.m fb_tile_plan)
+            elif var in screen_uv or om_only_ok: how, prio, sk = {'tiled': 1}, 0, ('tiled',)
             else: continue
-        i = len(calls)
-        if i >= 32: break
+        raw.append((m, reg[member], how, prio, sk))
+    # Assign up to 32 function constants, prioritizing proj/frag_pos/tiled over plain varying_locn; every site of one (tex_reg, share_key) shares one call
+    calls, slot_fc = [], {}
+    for p in (0, 1):
+        for _, r, how, prio, sk in raw:
+            if prio != p or (r, sk) in slot_fc: continue
+            if len(calls) >= 32: break
+            i = len(calls)
+            slot_fc[(r, sk)] = i
+            calls.append({'fc': i, 'tex_reg': r, **how})
+    out_parts, pos, sites = [], 0, collections.Counter()
+    for m, r, _, _, sk in raw:
+        i = slot_fc.get((r, sk))
+        if i is None: continue
         sel = ''.join(f'fx{i} == {k} ? fb{k} : ' for k in range(NFB))
-        out_parts.append(text[pos:m.start()]); out_parts.append(f'({sel}{m.group(0)})'); pos = m.end()
-        calls.append({'fc': i, 'tex_reg': reg[member], **how})
+        out_parts.append(text[pos:m.start()]); out_parts.append(f'({sel}{m.group(0)})'); pos = m.end(); sites[r] += 1
     if not calls and not om_only_ok:
         return None, 'no rewritable sample'
     # Mixed-use slots: the same texture also has other (non-rewritable) uses - at runtime this texture must not be switched to tile reads (the rewritten reads and the unrewritten ones would not see the same data)
-    conv = collections.Counter(c['tex_reg'] for c in calls)
+    conv = sites
     mixed = sorted({reg[mb] for mb in reg if mb in tex and text.count(f'spvDescriptorSet0.{mb}.') > conv[reg[mb]]})
     om = re.search(r'struct main0_out\s*\{(.*?)\};', src, re.S)
     if not om: return None, 'no output struct'
     outs = [(t, n, int(c)) for t, n, c in re.findall(r'(\w+) (m_\d+) \[\[color\((\d+)\)\]\];', om.group(1))]
-    if not outs or len(outs) > 4 or re.sub(r'\w+ m_\d+ \[\[color\(\d+\)\]\];', '', om.group(1)).strip(): return None, 'the output struct is not plain color outputs (or has more than 4)'
+    if not outs or len(outs) > NFB or re.sub(r'\w+ m_\d+ \[\[color\(\d+\)\]\];', '', om.group(1)).strip(): return None, 'the output struct is not plain color outputs (or has more than ' + str(NFB) + ')'
     rest = src[end:]
     if calls:   # the body's new parameters, and every call of it (the definition comes first) passing what turns the tile read off
         params = [f'int fx{i}' for i in range(len(calls))] + [f'float4 fb{k}' for k in range(NFB)]

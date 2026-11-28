@@ -22,7 +22,7 @@ static int feed(nvn_link_drain *d, double *now, int n, double period, double age
 
 int main(void) {
     char label[160];
-    const double T30 = 1.0 / 30, T60 = 1.0 / 60, W = 0.00115;
+    const double T30 = 1.0 / 30, T60 = 1.0 / 60, T120 = 1.0 / 120, W = 0.00115;
     nvn_link_drain d = {0}; double now = 100; int at = -1;
 
     // The spare ticks of a queue time
@@ -56,6 +56,27 @@ int main(void) {
     // The 60 Hz link holding frames 33 ms, taken off the acquire's ticks with a standing frame (fixed-rate fullscreen at 30 fps)
     d = (nvn_link_drain){0};
     CHECK(feed(&d, &now, 600, T30, 3 * T60 - W, T60, 2 * T60 - 0.005, 1, NULL) == 2, "two ticks of the 60 Hz link");
+
+    // 120 Hz display link (ProMotion VRR fullscreen at 60/30 fps, room 0 -> plain drain only, never LINK_DRAIN_LATCH)
+    CHECK(nvn_link_drain_spare(T120 - W, T120) == 0, "120 Hz link: one tick less present delay has nothing to spare");
+    CHECK(nvn_link_drain_spare(2 * T120 - W, T120) == 1, "120 Hz link: one held tick of phase shift spares one tick");
+    CHECK(nvn_link_drain_spare(3 * T120 - W, T120) == 2, "120 Hz link: a standing 60 fps frame spares two ticks");
+    CHECK(nvn_link_drain_spare(5 * T120 - W, T120) == 4, "120 Hz link: a standing 30 fps frame spares four ticks");
+    CHECK(nvn_link_drain_spare(T120 + 0.001, T120) == 0, "120 Hz link: a frame within LINK_DRAIN_MARGIN of its tick is not moved");
+    d = (nvn_link_drain){0};
+    CHECK(feed(&d, &now, 600, T60, T120 - W, T120, T60 - 0.004, 1, NULL) == 0 && d.drains == 0, "120 Hz link at 60 fps on time: no drain");
+    d = (nvn_link_drain){0};
+    k = feed(&d, &now, 600, T60, 3 * T120 - W, T120, T60 - 0.004, 1, &at);
+    CHECK(k == 2 && at >= 119 && at <= 121, "120 Hz link at 60 fps with a standing frame: plain drain of two ticks after 2 s");
+    CHECK(feed(&d, &now, 600, T60, T120 - W, T120, T60 - 0.004, 1, NULL) == 0, "120 Hz link at 60 fps after drain: no further drain");
+    d = (nvn_link_drain){0};
+    k = feed(&d, &now, 600, T60, 2 * T120 - W, T120, T60 - 0.004, 1, &at);
+    CHECK(k == 1 && at >= 119 && at <= 121, "120 Hz link at 60 fps shifted by one held tick: plain drain of one tick after 2 s");
+    d = (nvn_link_drain){0};
+    k = feed(&d, &now, 600, T30, 5 * T120 - W, T120, T30 - 0.005, 1, &at);
+    CHECK(k == 4 && at >= 59 && at <= 61, "120 Hz link at 30 fps with a standing frame: plain drain of four ticks after 2 s");
+    d = (nvn_link_drain){0};
+    CHECK(feed(&d, &now, 600, T60, 3 * T120 - W, T120, 0.001, 1, NULL) == 0, "120 Hz link: acquire wait under 2 ms floor does not drain");
 
     // The shortest queue time of the run decides
     d = (nvn_link_drain){0};

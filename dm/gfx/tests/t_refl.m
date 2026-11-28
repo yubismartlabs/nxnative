@@ -80,6 +80,20 @@ int main(void) { @autoreleasepool {
         check("fetch calls: slot 6, vector 989, x", 6 << 16 | 989 << 2, r.fc_scale[0][0]);
         NSDictionary *bad = @{@"route": @"B", @"stage": @"ps", @"bindings": @[], @"fetch": @{@"calls": @[@{@"fc": @0, @"tex_reg": @3, @"frag_pos": @[@[@16, @6, @0], @[@0, @6, @1]]}]}};
         check("fetch calls: a uniform slot out of range is refused", 1, nvn_refl_from_json(bad, &r, err, sizeof err) != 0);
+        // Tiled-barrier calls and up to 8 fetch outputs (Xenoblade Chronicles DE's 5-target G-buffer decals)
+        NSDictionary *tiled = @{@"route": @"B", @"stage": @"ps", @"bindings": @[], @"fetch": @{
+            @"calls": @[@{@"fc": @0, @"tex_reg": @5, @"tiled": @1}],
+            @"outputs": @[@{@"color": @0}, @{@"color": @1}, @{@"color": @2}, @{@"color": @3}, @{@"color": @4}, @{@"color": @5}, @{@"color": @6}, @{@"color": @7}]}};
+        check("fetch calls: tiled + 8 outputs succeeds", 0, nvn_refl_from_json(tiled, &r, err, sizeof err));
+        check("fetch calls: tiled bit", 1, r.fc_tiled);
+        check("fetch calls: tiled sentinel locn", 0xfe, r.fc_locn[0]);
+        check("fetch calls: 8 outputs", 8, r.nfo);
+        check("fetch calls: 5th output color 4", 4, r.fo_color[4]);
+        check("fetch calls: 8th output color 7", 7, r.fo_color[7]);
+        NSDictionary *too_many = @{@"route": @"B", @"stage": @"ps", @"bindings": @[], @"fetch": @{
+            @"calls": @[],
+            @"outputs": @[@{@"color": @0}, @{@"color": @1}, @{@"color": @2}, @{@"color": @3}, @{@"color": @4}, @{@"color": @5}, @{@"color": @6}, @{@"color": @7}, @{@"color": @0}]}};
+        check("fetch calls: more than 8 outputs refused", 1, nvn_refl_from_json(too_many, &r, err, sizeof err) != 0);
     }
     {   int f0 = fail;   // Route A is retired: PC-chain reflection (no route = B) must be rejected
         NSDictionary *pc = @{@"arg_buffer_index": @0, @"bindings": @[@{@"type": @"cbuffer", @"reg": @10, @"arg_id": @0, @"access": @"constant", @"msl_type": @"constant cb1_struct*"}], @"vertex_inputs": @[]};

@@ -550,6 +550,156 @@ static void fpos_case(const char *dir) {
     printf("feedback pixel-position tile read: %s\n", before == failed ? "PASS" : "FAIL");
     mtl_tex_release(&source); mtl_pool_del(mem); mtl_drain(); free(mem);
 }
+static void exec_barrier(int32_t bits) {
+    uint8_t ops[32] = {0}; op_hdr bh = {OP_BARRIER, 16}, eh = {OP_END, 8};
+    memcpy(ops, &bh, 8); memcpy(ops + 8, &bits, 4); memcpy(ops + 16, &eh, 8);
+    mtl_exec(ops);
+}
+// Samples after ORDER_FRAGMENTS_TILED barriers (DM_NVN_FB_TILED): an unprovable sample marked 'tiled' reads the tile only while the last fragment-ordering barrier
+// in this target sequence had ORDER_FRAGMENTS_TILED without ORDER_FRAGMENTS or ORDER_PRIMITIVES, and clears on stronger barriers, target changes, clears, and resets.
+static void tiled_case(const char *dir) {
+    int before = failed, tid = 662; NSString *d = @(dir);
+    g_msl_dir = d;
+    NSData *fj = [NSData dataWithContentsOfFile:[d stringByAppendingPathComponent:@"tiled.json"]];
+    NSDictionary *facts = fj ? [NSJSONSerialization JSONObjectWithData:fj options:0 error:nil] : nil;
+    id<MTLLibrary> vl = lib_file([d stringByAppendingPathComponent:@"fb_vs.metal"]), fl = lib_file([d stringByAppendingPathComponent:@"fb_tiled.metal"]);
+    CHECK(facts && vl && fl, "the tiled fixture's shaders compile");
+    if (!facts || !vl || !fl) return;
+    NSError *bfe = nil;
+    id<MTLLibrary> bfl = lib_from_file([d stringByAppendingPathComponent:@"fedcba9876543213_bf.metallib"], &bfe);
+    CHECK(bfl && [bfl.functionNames containsObject:@"main0_f"], "the folded tiled library exposes main0_f");
+    NvProg *pr = [NvProg new]; NvShader *vs = [NvShader new], *fs = [NvShader new]; pr->sh[0] = vs; pr->sh[1] = fs;
+    vs->stage = 0; strcpy(vs->key, "0123456789abcde0_b"); vs->fn = [vl newFunctionWithName:@"main0"]; vs->rf.pos_attr = -1;
+    fs->stage = 1; strcpy(fs->key, "fedcba9876543213_b"); fs->fn = [fl newFunctionWithName:@"main0"];
+    fs->rf.nb = 1; fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEX, .reg=0, .aid=0, .dtt=MTLTextureType2D};
+    for (NSDictionary *c in facts[@"calls"]) { int i = fs->rf.nfc++; fs->rf.fc_reg[i] = (uint8_t)[c[@"tex_reg"] intValue];
+        if ([c[@"tiled"] intValue]) { fs->rf.fc_tiled |= 1u << i; fs->rf.fc_locn[i] = 0xfe; } }
+    for (NSDictionary *o in facts[@"outputs"]) fs->rf.fo_color[fs->rf.nfo++] = (uint8_t)[o[@"color"] intValue];
+    fs->rf.color_known = 1; fs->rf.color_mask = 1;
+    CHECK(fs->rf.nfc == 1 && fs->rf.fc_tiled == 1 && !fs->rf.fc_proj && !fs->rf.fc_fpos, "the tiled fixture's facts: one tiled sample on slot 0");
+    NSError *e = nil;
+    id<MTLLibrary> gl = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+        "vertex float4 v(uint i[[vertex_id]]) { return float4(i == 1 ? 3.0 : -1.0, i == 2 ? 3.0 : -1.0, 0, 1); }\n"
+        "fragment float4 f() { return float4(0, 1, 0, 1); }\n" options:nil error:&e];
+    MTLRenderPipelineDescriptor *gd = [MTLRenderPipelineDescriptor new];
+    gd.vertexFunction = [gl newFunctionWithName:@"v"]; gd.fragmentFunction = [gl newFunctionWithName:@"f"]; gd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    id<MTLRenderPipelineState> green = gl ? [g_dev newRenderPipelineStateWithDescriptor:gd error:&e] : nil;
+    CHECK(green != nil, "the tiled green pipeline compiles");
+    tex_t source, other; id<MTLTexture> attachment = target(&source, 99797); target(&other, 99798);
+    mtl_reg_tex(tid, &source, NULL);
+    id<MTLBuffer> zero = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared]; res_add(zero);
+    id<MTLBuffer> result = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared]; res_add(result);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &source; S.tex[1][0] = tid; S.chmask.mask = 0xffffffffu;
+    S.has_vp = 1; S.vp[0][0] = 0; S.vp[0][1] = 0; S.vp[0][2] = 4; S.vp[0][3] = 4;
+    uint64_t copies = g_fb_count, waits = g_fb_tile_wait, tiles = g_fb_tile_draws;
+    // Without a tiled barrier: snapshot, no tile pipeline started
+    clear(MTLClearColorMake(1, 0, 0, 1));
+    fb_prepare(pr);
+    CHECK(g_fb_n == 1 && !g_enc && g_fb_count == copies + 1 && g_fb_tile_wait == waits && g_fb_tseq != g_draw_seq, "without ORDER_FRAGMENTS_TILED, a tiled call takes a snapshot");
+    // After ORDER_FRAGMENTS_TILED | INVALIDATE_TEXTURE: starts building the tile pipeline in the background
+    clear(MTLClearColorMake(1, 0, 0, 1));
+    exec_barrier(NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT | NVN_BARRIER_INVALIDATE_TEXTURE_BIT);
+    CHECK(g_fb_tiled_bar == 1, "ORDER_FRAGMENTS_TILED sets g_fb_tiled_bar");
+    fb_prepare(pr);
+    CHECK(g_fb_n == 1 && !g_enc && g_fb_count == copies + 2 && g_fb_tile_wait == waits + 1, "after ORDER_FRAGMENTS_TILED, the draw starts building its tile pipeline");
+    for (int i = 0; i < 1000; i++) { os_unfair_lock_lock(&g_fb_tp_lock); int done = 1; for (int k = 0; k < g_fb_tp_n; k++) done &= g_fb_tp[k].done; os_unfair_lock_unlock(&g_fb_tp_lock); if (done) break; usleep(10000); }
+    // Once built: draw green on the left, tiled barrier, draw reads tile in the same open pass
+    clear(MTLClearColorMake(1, 0, 0, 1));
+    id first = g_enc;
+    enc_r_pso(g_enc, green); enc_r_viewport(g_enc, (MTLViewport){0, 0, 4, 4, 0, 1}); enc_r_scissor(g_enc, (MTLScissorRect){0, 0, 2, 4});
+    enc_r_draw(g_enc, MTLPrimitiveTypeTriangle, 0, 3);
+    exec_barrier(NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT | NVN_BARRIER_INVALIDATE_TEXTURE_BIT);
+    fb_prepare(pr);
+    CHECK(g_enc == first && g_fb_n == 0 && g_fb_tseq == g_draw_seq && g_fb_tfn && g_fb_tile_draws == tiles + 1 && g_fb_tdesc.fbmask == 1 && g_fb_tdesc.fx[0] == 0,
+          "after ORDER_FRAGMENTS_TILED, the tiled call reads the tile: no snapshot, pass stays open");
+    g_pso_lmap = g_fb_tlmap; g_pso_fsfn = g_fb_tfn; g_pso_fz = g_fb_tdesc;
+    id<MTLRenderPipelineState> ps = pso_get(pr, nil);
+    g_pso_lmap = NULL; g_pso_fsfn = nil; memset(&g_pso_fz, 0, sizeof g_pso_fz);
+    CHECK(ps != nil, "the tiled tile-reading pipeline is ready");
+    if (ps) { enc_r_pso(g_enc, ps); enc_r_scissor(g_enc, (MTLScissorRect){0, 0, 4, 4}); enc_r_args(g_enc, MTLRenderStageFragment, zero.gpuAddress, 0); enc_r_draw(g_enc, MTLPrimitiveTypeTriangle, 0, 3); }
+    // Non-ordering INVALIDATE_TEXTURE preserves g_fb_tiled_bar
+    exec_barrier(NVN_BARRIER_INVALIDATE_TEXTURE_BIT);
+    CHECK(g_fb_tiled_bar == 1, "INVALIDATE_TEXTURE alone preserves g_fb_tiled_bar");
+    rp_end();
+    enc_b_copy_texture_buffer(blit(), attachment, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(4, 4, 1), result, 0, 256, 1024);
+    // Stronger barriers (ORDER_FRAGMENTS, ORDER_PRIMITIVES, and combined ORDER_FRAGMENTS | ORDER_FRAGMENTS_TILED) must clear g_fb_tiled_bar
+    const int32_t clear_bars[3] = {
+        NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT,
+        NVN_BARRIER_ORDER_PRIMITIVES_BIT | NVN_BARRIER_INVALIDATE_TEXTURE_BIT,
+        NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_INVALIDATE_TEXTURE_BIT,
+    };
+    for (int bi = 0; bi < 3; bi++) {
+        clear(MTLClearColorMake(1, 0, 0, 1));
+        exec_barrier(NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT | NVN_BARRIER_INVALIDATE_TEXTURE_BIT);
+        exec_barrier(clear_bars[bi]);
+        CHECK(g_fb_tiled_bar == 0, "full fragment/primitive barrier clears g_fb_tiled_bar");
+        fb_prepare(pr);
+        CHECK(g_fb_n == 1 && g_fb_tseq != g_draw_seq, "after full barrier, tiled call falls back to snapshot");
+    }
+    // Target switch via OP_SET_RT clears g_fb_tiled_bar
+    clear(MTLClearColorMake(1, 0, 0, 1));
+    exec_barrier(NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT | NVN_BARRIER_INVALIDATE_TEXTURE_BIT);
+    { uint8_t ops[512] = {0}; p_set_rt rt = {0}; rt.n = 1; rt.color[0] = &other;
+      op_hdr sh = {OP_SET_RT, 8 + sizeof(p_set_rt)}, eh = {OP_END, 8};
+      memcpy(ops, &sh, 8); memcpy(ops + 8, &rt, sizeof(p_set_rt)); memcpy(ops + sh.size, &eh, 8); mtl_exec(ops); }
+    CHECK(g_fb_tiled_bar == 0, "non-continued OP_SET_RT clears g_fb_tiled_bar");
+    R.rt.n = 1; R.rt.color[0] = &source;
+    // DM_NVN_FB_TILED=0 turns tiled reads off
+    clear(MTLClearColorMake(1, 0, 0, 1));
+    exec_barrier(NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT | NVN_BARRIER_INVALIDATE_TEXTURE_BIT);
+    int saved_mode = g_fb_tiled_mode; g_fb_tiled_mode = 0;
+    fb_prepare(pr);
+    CHECK(g_fb_n == 1 && g_fb_tseq != g_draw_seq, "DM_NVN_FB_TILED=0 disables tiled reads");
+    g_fb_tiled_mode = saved_mode;
+    // Plain varying_locn and unproven proj calls also read from the tile only under ORDER_FRAGMENTS_TILED
+    fs->rf.fc_tiled = 0; fs->rf.fc_proj = 0; fs->rf.fc_locn[0] = 4;
+    clear(MTLClearColorMake(1, 0, 0, 1));
+    exec_barrier(NVN_BARRIER_ORDER_FRAGMENTS_BIT);
+    fb_prepare(pr);
+    CHECK(g_fb_n == 1 && g_fb_tseq != g_draw_seq, "plain varying_locn takes a snapshot without ORDER_FRAGMENTS_TILED");
+    clear(MTLClearColorMake(1, 0, 0, 1));
+    exec_barrier(NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT | NVN_BARRIER_INVALIDATE_TEXTURE_BIT);
+    fb_prepare(pr);
+    CHECK(g_fb_n == 0 && g_fb_tseq == g_draw_seq, "plain varying_locn reads the tile after ORDER_FRAGMENTS_TILED");
+    fs->rf.fc_proj = 1;   // vs has scr_locn == 0 so scr_proof fails
+    clear(MTLClearColorMake(1, 0, 0, 1));
+    exec_barrier(NVN_BARRIER_ORDER_FRAGMENTS_BIT);
+    fb_prepare(pr);
+    CHECK(g_fb_n == 1 && g_fb_tseq != g_draw_seq, "unproven proj takes a snapshot without ORDER_FRAGMENTS_TILED");
+    clear(MTLClearColorMake(1, 0, 0, 1));
+    exec_barrier(NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT | NVN_BARRIER_INVALIDATE_TEXTURE_BIT);
+    fb_prepare(pr);
+    CHECK(g_fb_n == 0 && g_fb_tseq == g_draw_seq, "unproven proj falls back to tile read after ORDER_FRAGMENTS_TILED");
+    // OP_CLEAR_COLOR clears g_fb_tiled_bar
+    { uint8_t ops[64] = {0}; p_clear_color cc = {.index = 0, .mask = 0xf, .rgba = {1, 0, 0, 1}};
+      op_hdr ch = {OP_CLEAR_COLOR, 8 + sizeof(p_clear_color)}, eh = {OP_END, 8};
+      memcpy(ops, &ch, 8); memcpy(ops + 8, &cc, sizeof(p_clear_color)); memcpy(ops + ch.size, &eh, 8); mtl_exec(ops); }
+    CHECK(g_fb_tiled_bar == 0, "OP_CLEAR_COLOR clears g_fb_tiled_bar");
+    fs->rf.fc_proj = 0; fs->rf.fc_tiled = 1; fs->rf.fc_locn[0] = 0xfe;
+    // Geometry stage refuses tiled reads
+    clear(MTLClearColorMake(1, 0, 0, 1));
+    exec_barrier(NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT | NVN_BARRIER_INVALIDATE_TEXTURE_BIT);
+    pr->sh[4] = vs;
+    fb_prepare(pr);
+    pr->sh[4] = nil;
+    CHECK(g_fb_n == 1 && g_fb_tseq != g_draw_seq, "geometry stage refuses tiled reads");
+    // state_reset clears g_fb_tiled_bar
+    exec_barrier(NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT);
+    CHECK(g_fb_tiled_bar == 1, "tiled barrier set before state_reset");
+    state_reset();
+    CHECK(g_fb_tiled_bar == 0, "state_reset clears g_fb_tiled_bar");
+    rp_end();
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "tiled GPU submission completed");
+    CHECK(!mtl_last_commit_error(), "tiled GPU submission has no error");
+    int left = 1, right = 1;
+    for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) { const uint8_t *p = (const uint8_t *)result.contents + y * 256 + x * 4;
+        if (x < 2) left &= p[0] == 255 && p[1] == 0 && p[2] == 0; else right &= p[0] == 0 && p[1] == 0 && p[2] == 255; }
+    CHECK(left, "tiled read gives green where the earlier draw wrote green");
+    CHECK(right, "tiled read gives cleared red elsewhere");
+    printf("feedback tiled-barrier tile read: %s\n", before == failed ? "PASS" : "FAIL");
+    mtl_tex_release(&source); mtl_tex_release(&other);
+}
 // A frame that snapshots more keys than the cache has entries, in several sizes (Tears of the Kingdom: 4-5 a frame), makes no texture once each size has one: a new key takes an entry
 // whose texture has its format and size. Taking the entries in turn made one for nearly every snapshot (GitHub #931). Entries a later draw can still reuse are taken last
 static void shape_case(void) {
@@ -1336,7 +1486,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (pipeline) slot_case(pr, pipeline, 3, 3);
     image_view_case(pr);
     swizzle_case();
-    if (argc == 2) { tile_case(argv[1]); fpos_case(argv[1]); om_case(argv[1]); }
+    if (argc == 2) { tile_case(argv[1]); fpos_case(argv[1]); tiled_case(argv[1]); om_case(argv[1]); }
     pool_depth_case();
     reuse_tables_case();
     pool_depth_snapshot_case();
