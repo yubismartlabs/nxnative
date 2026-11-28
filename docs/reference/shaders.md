@@ -760,6 +760,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Reader:** `uepak.py` `inline_shaders` also takes the global shader cache with no `.ushaderbytecode` as inline when the containers in the pak's folder hold export bundles and no [shader libraries](#unreal-engine-56-iostore-shader-libraries) (`inline_in_containers`; with neither a `.uexp` nor such a container the NSP script stops rather than read the global shaders alone), and `shader_split.py` `ue_legacy_jobs` then also reads the export bundles of the containers beside such a pak, the newest copy of each chunk ID (`mount_order`), through the game's own Oodle in the host's tool mode. Bulk data chunks are skipped. `Toc.names` reads the container's directory index, so a shader's label names its package, as for a pak, and `shader_groups` works the same way.
 - **Found on:** [Mario & Luigi: Brothership](../../dm/games/01006D0017F7A000/README.md): 45,824 unique shaders from 8.8 GB of export bundles in 39 s.
 
+### Content-only Unreal paks trigger shared shader preparation
+
+- **Symptom:** the build stops with `none … holds a shader code archive` even though the inline shader scan has a valid source.
+- **Cause:** the version 11 and 12 pak classifier scheduled shared archive preparation for any nonempty directory index that did not select the inline scan. Paks containing movies and other assets could therefore schedule a decode job with no shader archives.
+- **Fix:** content-only indexes select neither path. Pak indexes and IoStore shader libraries are checked separately, so an IoStore library can schedule shared archive preparation even when the pak beside it contains only assets.
+- **Found on:** [Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2](../../dm/games/0100AD80208A8000/README.md), update 2.01. Three asset-only paks triggered the failed shared decode.
+
 ### An entry of a package's export list read as an Oodle shader table
 
 - **Symptom:** the shader split reports `the game's decoder in the Mac host failed on a 8 → 30650 byte stream`, the host's output says `asked to decode Legacy compressor; not supported!`, and a run of the NSP script stops with `file(s) could not be read` (a provisional profile goes on without those shaders).

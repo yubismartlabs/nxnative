@@ -1,0 +1,42 @@
+# The Witcher 3: Wild Hunt (US base + separate DLCs, update 4.04b / v262144), checked on the Mac from title into Kaer Morhen under both stock 64 GiB and 4.375 GiB iOS alias layouts; see README.md
+
+# ---- Identity ----
+title_id	0100E67012924000
+program_id	0100E67012924000
+
+# ---- App ----
+name	The Witcher 3: Wild Hunt
+ipa	TheWitcher3WildHunt.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v262144	4.04b	main=b151a224a429f9a73abb05c5a3de9468	sdk=d5a1029a57d8cd4fdf4eacad87b0cfd0
+package	v262144
+shader_versions	v262144
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	content/patch0/bundles/patch.bundle
+zip_store	.bundle:.cache:.dds:.png:.redscripts:.snd:.store:.usm:.w3speech:.metallib
+
+# ---- Memory ----
+# REDengine 3's DT_INIT_ARRAY[0] reserves a 48 GiB address region at main+0x89e8 and bumps four sub-ranges out of it (8 GiB small-block slabs, 32 GiB TLSF heap, 33.7 MiB and 40 MiB fixed pools).
+# The engine-wide alias_only rule in dm/tools/engine_patches.py shrinks those reservations to 2.75 GiB (384 MiB small-block + 2.25 GiB TLSF) on iOS so the game fits the standard 5 GiB / 4.375 GiB unentitled iPhone block without extended-virtual-addressing; the Mac loader restores the original 48 GiB layout under its 64 GiB alias region (docs/reference/memory.md).
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 4 MB of system resource
+sys_resource	0x400000
+
+# ---- Frame rate ----
+# 60 fps (30 on the Switch): the game asks for present interval 2 once, at window creation, and has no other limit; display mode presents at the cap by the present interval alone, matching 0100A0800E9C4000
+fps_target	60
+present_interval	display
+
+# ---- Shader split ----
+shader_groups	/bin/=bin /content/=content /dlc/=dlc
+shader_note	The Witcher 3: Wild Hunt shaders (REDengine 3 shader caches in content and patch0, main, loose .bin files)
+# the game selects near-zero NVN depth (nvnDeviceSetDepthMode, log: "depth mode near=0"); offline pipeline bases use main0_z
+depth_mode	zero

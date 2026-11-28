@@ -121,6 +121,50 @@ class Registry(unittest.TestCase):
             self.assertNotEqual(module, 'sdk', "Nintendo's SDK fixes belong in sdk_patches.py")
             for rule in rules: validate(rule)
 
+    def test_redengine_va_reserve_check(self):
+        # check_redengine_va_reserve accepts a bl at +0x14 targeting a standard PLT stub for nn::os::AllocateAddressRegion and rejects wrong symbols or non-PLT targets
+        import struct
+        from nso_match import MatchError
+        m = runpy.run_path(str(REPO / 'dm/tools/engine_patches.py'))
+        check = m['check_redengine_va_reserve']
+        rules = [r for r in m['MATCH_CUTS']['main'] if r['name'].startswith('REDengine 3 virtual address reservation')]
+        self.assertEqual(len(rules), 2)
+        for r in rules:
+            self.assertTrue(r.get('alias_only'))
+
+        def make_module(sym_name, valid_plt=True):
+            img = bytearray(0x6000)
+            # MOD0 at 0x1000 pointing to DT_DYNAMIC at 0x1100
+            struct.pack_into('<I', img, 4, 0x1000)
+            img[0x1000:0x1004] = b'MOD0'
+            struct.pack_into('<i', img, 0x1004, 0x100)
+            # DT_DYNAMIC at 0x1100: DT_STRTAB(5)=0x2000, DT_SYMTAB(6)=0x2200, DT_JMPREL(23)=0x2400, DT_PLTRELSZ(2)=24
+            dyn = [(5, 0x2000), (6, 0x2200), (23, 0x2400), (2, 24), (0, 0)]
+            for i, (t, v) in enumerate(dyn):
+                struct.pack_into('<qQ', img, 0x1100 + i * 16, t, v)
+            raw = sym_name.encode('ascii') + b'\0'
+            img[0x2001:0x2001 + len(raw)] = raw
+            # Sym 1 at 0x2200 + 24: st_name=1
+            struct.pack_into('<I', img, 0x2218, 1)
+            # JMPREL entry at 0x2400: r_offset=got=0x3008, r_info=(1<<32)|1026
+            struct.pack_into('<QQq', img, 0x2400, 0x3008, (1 << 32) | 1026, 0)
+            # Function at 0x200: bl at 0x214 -> plt at 0x400 (imm26 = (0x400-0x214)//4 = 0x7b)
+            struct.pack_into('<I', img, 0x214, 0x94000000 | ((0x400 - 0x214) // 4))
+            # PLT stub at 0x400: adrp x16, #0x3000; ldr x17, [x16, #8]; add x16, x16, #8; br x17
+            # adrp x16 from page 0x0 to page 0x3000: imm=3 -> immlo=3, immhi=0 -> 0xf0000010
+            struct.pack_into('<IIII', img, 0x400,
+                             0xf0000010,
+                             0xf9400611 if valid_plt else 0xd503201f,
+                             0x91002210,
+                             0xd61f0220)
+            return docs_patches.types.SimpleNamespace(image=img, text_end=0x1000)
+
+        check(make_module('_ZN2nn2os21AllocateAddressRegionEPmm'), 0x200)
+        with self.assertRaises(MatchError):
+            check(make_module('_ZN2nn2os17FreeAddressRegionEm'), 0x200)
+        with self.assertRaises(MatchError):
+            check(make_module('_ZN2nn2os21AllocateAddressRegionEPmm', valid_plt=False), 0x200)
+
     def test_function_matched_frame_steps(self):
         # one frame step per main, in a game's own patches.py; its stub writes only inside the function it was matched by and the other functions it names (docs_patches.frame_step_sites
         # with that base), and writes no site in another function it could not find (ctx.others[label] None)

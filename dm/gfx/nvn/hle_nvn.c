@@ -702,6 +702,17 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
     }
     o->has_layout = s->has_layout; memcpy(o->layout, s->layout, 8); o->set_swz = s->set_swz; o->stencil = s->stencil; o->swz = s->swz;
     nvn_tex_layout(&o->d, &o->L);
+    // Grand Bazaar puts complete sparse mip chains in non-virtual pools sized without the final 64 KiB tile padding.
+    // Limit the backed span to the chain's end if it fits. The sparse flag and every mip's layout still describe the guest bytes.
+    if ((o->d.flags & NVN_TEXTURE_FLAGS_SPARSE) && o->L.layers == 1 && s->pool && s->pool->mem &&
+        !(s->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) && s->off >= 0 && (uint64_t)s->off < s->pool->size) {
+        uint64_t available = s->pool->size - (uint64_t)s->off;
+        if (o->L.size > available) {
+            unsigned levels = o->d.levels ? o->d.levels : 1;
+            uint64_t mip_end = nvn_tex_level_offset(&o->d, levels);
+            if (mip_end && mip_end <= available) o->L.size = o->L.layer_size = mip_end;
+        }
+    }
     if (s->pool) vpool_taken(s->pool);
     o->mem = s->pool && s->pool->mem ? s->pool->mem + s->off : NULL;
     o->serial = nvn_new_serial(); mtl_tex_init(o);

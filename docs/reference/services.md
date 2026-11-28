@@ -1159,6 +1159,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the filter now gets a host vtable (`ngc_vtable` in `hle_misc.c`): each slot of the SDK's `_ZTVN2nn3ngc15ProfanityFilterE` is matched by address with the class's methods, and slots the loader already bound to forced take-overs keep them. The `unsigned short` and `char16_t` overloads are taken over by name too, as are the `char` overload, `SetMaskMode` and `Finalize` (`hle_misc.c`). Nothing is masked or reported.
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) (the vtable); [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) (SDK 4.5.0; one boot: the UTF-16 overload by name); [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: the `char` overload, `SetMaskMode`, `Finalize`).
 
+### The offline profanity filter's content version
+
+- **Symptom:** the keyboard returns valid text, but the game displays `That name cannot be used.` for player and farm names.
+- **Cause:** the filter's initializer returns success, but `GetContentVersion` returned zero. Grand Bazaar checks the virtual method's result and treats zero as a validation failure (`main+0x2bd13b8` in 1.5.0).
+- **Fix:** return version 1 for the host's offline filter, through both the symbol hook and the vtable. The host has no access to the Nintendo SDK's system word list, so the offline filter reports no matches.
+- **Found on:** [STORY OF SEASONS: Grand Bazaar](../../dm/games/0100DAE01E4C8000/README.md#mac-testing), [issue #3459](https://github.com/seedds/nxnative/issues/3459).
+
 ### `nn::ngc` China-region profanity check and mask
 
 - **Symptom:** `[RED] sf: the game connects to service ngct:u itself, which the host does not serve`, then `Break#1 reason=0 Result=0xe15` from the SDK when the player name is entered after a race (Cruis'n Blast).

@@ -1,0 +1,5 @@
+# Hand-written translation facts (merged by dm/gfx/tools/shader_split.py over the generated shader_facts.tsv): key <TAB> fact JSON.
+# Same three shaders as Complete Edition (0100A0800E9C4000), all present in 0100E67012924000's shader map.
+11130a61f4a6f3ec	{"img":{"0":{"fmt":"R8G8Unorm","type":"2d"},"1":{"fmt":"R11G11B10Float","type":"2d"}},"local":[16,16,1],"shared":1552}
+a52ac3530463868c	{"tex": {"128": "2d"}}
+eacf9338c2835b9e	{"tex":{"128":"2d","129":"2d","130":"2d","131":"2d","132":"2d"}}

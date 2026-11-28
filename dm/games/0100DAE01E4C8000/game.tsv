@@ -1,0 +1,34 @@
+# STORY OF SEASONS: Grand Bazaar 1.5.0, Unity 6000.0.28f1 IL2CPP, Nintendo SDK 18.3.5, NVN.
+
+# ---- Identity ----
+title_id	0100DAE01E4C8000
+program_id	0100DAE01E4C8000
+
+# ---- App ----
+name	STORY OF SEASONS: Grand Bazaar
+ipa	StoryOfSeasonsGrandBazaar.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v655360	1.5.0	main=2ef3bb19eac3b0a5697768f8a453953f	subsdk0=6b29d0c7a23a7c0bf7fb98699cc8bcb7	sdk=6075151627016eef437c1312f2e3ed56
+package	v655360
+shader_versions	v655360
+
+# ---- Files ----
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/Sound/se_common.acb
+zip_store	.assets:.awb:.bundle:.dat:.json:.nro:.ress:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MiB of system resource. Unity maps its own memory in the alias region.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+
+# ---- Graphics ----
+# The game selects near-zero depth before drawing. Prebuild pipelines with that mode.
+depth_mode	zero
+shader_groups	/Data/=data /.nrr/=nrr /Plugins/=plugins
+shader_note	STORY OF SEASONS: Grand Bazaar shaders

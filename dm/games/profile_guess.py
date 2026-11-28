@@ -290,7 +290,7 @@ def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_pa
     or frostbite Frostbite superbundles, whose cas files are Oodle Leviathan, or oodle_ttdat TT Games CC4 DAT archives, or anvil_forges Anvil forges:
     Oodle-compressed file by file, which the shader split decodes with the game's own decoder in the Mac host's tool mode), ue_legacy (Unreal paks whose shaders are inline in the cooked packages:
     legacy paks, version 4, which the shader split reads through the game's own decoder the same way, and version 11 paks without shader code archives, Zlib, read by uepak.py itself).
-    unreal_paks counts the paks with shader code archives, legacy_paks those with inline shaders (uepak.inline_shaders). Checked against every profile: Hades and Super Mario Galaxy Vulkan, Galaxy alone with no SPIR-V file, Three Houses alone compiling
+    unreal_paks counts the shared shader archive sources selected for preparation, legacy_paks the paks with inline shaders (uepak.inline_shaders). Checked against every profile: Hades and Super Mario Galaxy Vulkan, Galaxy alone with no SPIR-V file, Three Houses alone compiling
     shaders (13 Sentinels holds 106 GLSL sources but does not import glslcCompile; Captain Toad: Treasure Tracker imports it with agl's GLSL sources, but no module defines it), Octopath Traveler 0
     alone with version 11 Unreal paks, DRAGON QUEST XI S alone with legacy ones (OCTOPATH TRAVELER II's version 11 pak has inline shaders too), Pokémon Legends: Z-A alone with Trinity packs, Digimon Story Cyber Sleuth and Balatro alone with OpenGL (of the 23 games
     extracted; Hades and both Galaxies import 99 or 100 Vulkan functions, Balatro only vkGetInstanceProcAddr), Balatro alone composing its GLSL.
@@ -327,7 +327,7 @@ def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_pa
                               f'the NROs the game loads call glslcCompile in {", ".join(glslc_mods)}: shaders compiled at run time (Portal), captured by booting it on the Mac' if nro_glslc and not ((glsl_src or romfs_glsl) and 'glslcCompile' in imports) else
                               f'the RomFS holds {romfs_glsl} GLSL source files and main calls glslcCompile in {", ".join(glslc_mods) or "no module it loads"}: shaders compiled at run time (Turrican Anthology Vol. I), captured by booting it on the Mac' if romfs_glsl and not glsl_src else
                               f'main holds {glsl_src} GLSL sources and calls glslcCompile in {", ".join(glslc_mods) or "no module it loads"}: shaders compiled at run time (Fire Emblem: Three Houses), captured by booting it on the Mac'),
-            'ue_decode': (not vulkan and not gl and bool(unreal_paks), f'{unreal_paks} Unreal pak(s) selected for shared shader archive preparation'),
+            'ue_decode': (not vulkan and not gl and bool(unreal_paks), f'{unreal_paks} Unreal source(s) selected for shared shader archive preparation'),
             'oodle_packs': (not vulkan and not gl and bool(trinity_packs or oodle_pkz or oodle_gfpak or oodle_ue3 or frostbite or oodle_ttdat or anvil_forges), (f'{trinity_packs} Trinity pack file(s) (ONEPACK, arc/data.trpfs: Pokémon Legends: Z-A)' if trinity_packs else
                             'Frostbite superbundles (Data/layout.toc, cas files: EA SPORTS FC 27), the shaders in their CompiledBytecode resources' if frostbite else
                             f'{oodle_pkz} PlatinumGames PKZ archive(s) with Oodle Kraken entries (Bayonetta 3)' if oodle_pkz else
@@ -470,7 +470,8 @@ def build_sources(exefs, romfs, modules):
                     with open(os.path.join(d, n), 'rb') as f: gl_files += is_standalone_glsl(text_of(f.read()))
             gl_files += len(paired_sources(d, names))
     dec = decoder_archives([romfs], mains=[exefs / 'main'])
-    return shader_sources(imports, glsl_src, glslc_mods, spirv, len(uepak.unreal_paks(str(romfs), inline=False, mains=[exefs / 'main'])),
+    shared = len(uepak.unreal_paks(str(romfs), inline=False, mains=[exefs / 'main'])) + len(uepak.io_shader_tocs(str(romfs)))
+    return shader_sources(imports, glsl_src, glslc_mods, spirv, shared,
                           gl_names=gl_names, gl_src=gl_src, gl_files=gl_files, nro_imports=nro_imp,
                           romfs_glsl=romfs_glsl, gl_fixed_calls=fixed_calls, vk_named=vk_named, **dec)
 

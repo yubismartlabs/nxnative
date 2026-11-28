@@ -102,6 +102,13 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             public int AddRawFindFunction(Function function) => _hfm.AddFunction(function);
 
+            // nxnative: same-base raw global load coalescing helpers and group table (BuildRawCoalesceGroups)
+            public int RawBaseFunction = -1;
+            public readonly Dictionary<(StorageKind, int), int> RawOffFunctions = [];
+            public readonly Dictionary<Operation, RawCoalesceMember> RawCoalesced = [];
+
+            public int AddRawHelperFunction(Function function) => _hfm.AddFunction(function);
+
             // nxnative: the raw vector load helpers by word count (TryGenerateRawStorageOp), kept apart from _entries, where a scalar load would find them
             public readonly Dictionary<int, int> RawVectorFunctions = [];
 
@@ -242,6 +249,53 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             }
         }
 
+        // nxnative: a group of pure raw global loads sharing one base pointer (baseLo, baseHi, optional dynOff) with constant byte offsets within 4 KiB.
+        // Because every gmem_map entry is 4 KiB page-aligned, a <= 4 KiB window crosses at most one entry boundary (at most two entries).
+        // One dmsh_raw_base call at the dominating anchor resolves (h0, r0, h1, split, r1); every member load executes inline with zero noinline calls.
+        private sealed class RawCoalesceGroup
+        {
+            public readonly Operand BaseLo;
+            public readonly Operand BaseHi;
+            public readonly Operand DynOff;
+            public readonly int MinOff;
+            public readonly int MaxOff;
+            public readonly int MaxEnd;
+            public readonly Operation Anchor;
+
+            public Operand H0Lo;
+            public Operand H0Hi;
+            public Operand R0;
+            public Operand H1Lo;
+            public Operand H1Hi;
+            public Operand Split;
+            public Operand R1;
+
+            public RawCoalesceGroup(Operand baseLo, Operand baseHi, Operand dynOff, int minOff, int maxOff, int maxEnd, Operation anchor)
+            {
+                BaseLo = baseLo;
+                BaseHi = baseHi;
+                DynOff = dynOff;
+                MinOff = minOff;
+                MaxOff = maxOff;
+                MaxEnd = maxEnd;
+                Anchor = anchor;
+            }
+        }
+
+        private readonly struct RawCoalesceMember
+        {
+            public readonly RawCoalesceGroup Group;
+            public readonly int OrigOffset;
+
+            public RawCoalesceMember(RawCoalesceGroup group, int origOffset)
+            {
+                Group = group;
+                OrigOffset = origOffset;
+            }
+
+            public int Delta => OrigOffset - Group.MinOff;
+        }
+
         public static void RunPass(
             HelperFunctionManager hfm,
             BasicBlock[] blocks,
@@ -268,6 +322,33 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             }
 
             GtsContext gtsContext = new(hfm, ampere, gpuAccessor.QueryRawGlobalMemory(), hasGlobalWrite);
+
+            // Pre-collect SharedMemory/LocalMemory base-address stores so FindUniqueBaseAddressCb has complete visibility during raw coalescing discovery.
+            foreach (BasicBlock block in blocks)
+            {
+                for (LinkedListNode<INode> node = block.Operations.First; node != null; node = node.Next)
+                {
+                    if (node.Value is Operation operation &&
+                        operation.Inst == Instruction.Store &&
+                        (operation.StorageKind == StorageKind.SharedMemory ||
+                         operation.StorageKind == StorageKind.LocalMemory))
+                    {
+                        if (TryGetMemoryOffsets(operation, out LsMemoryType type, out Operand baseOffset, out int constOffset))
+                        {
+                            Operand value = operation.GetSource(operation.SourcesCount - 1);
+
+                            SearchResult result = FindUniqueBaseAddressCb(gtsContext, block, value, needsOffset: false);
+                            if (result.Found)
+                            {
+                                uint targetCb = PackCbSlotAndOffset(result.SbCbSlot, result.SbCbOffset, result.Handle);
+                                gtsContext.AddMemoryTargetCb(type, baseOffset, constOffset, targetCb, result);
+                            }
+                        }
+                    }
+                }
+            }
+
+            BuildRawCoalesceGroups(gtsContext, blocks);
 
             foreach (BasicBlock block in blocks)
             {
@@ -309,26 +390,6 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                             node = nextNode;
                         }
                     }
-                    else if (operation.Inst == Instruction.Store &&
-                        (operation.StorageKind == StorageKind.SharedMemory ||
-                        operation.StorageKind == StorageKind.LocalMemory))
-                    {
-                        // The NVIDIA compiler can sometimes use shared or local memory as temporary
-                        // storage to place the base address and size on, so we need
-                        // to be able to find such information stored in memory too.
-
-                        if (TryGetMemoryOffsets(operation, out LsMemoryType type, out Operand baseOffset, out int constOffset))
-                        {
-                            Operand value = operation.GetSource(operation.SourcesCount - 1);
-
-                            SearchResult result = FindUniqueBaseAddressCb(gtsContext, block, value, needsOffset: false);
-                            if (result.Found)
-                            {
-                                uint targetCb = PackCbSlotAndOffset(result.SbCbSlot, result.SbCbOffset, result.Handle);
-                                gtsContext.AddMemoryTargetCb(type, baseOffset, constOffset, targetCb, result);
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -359,6 +420,12 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             LinkedListNode<INode> node)
         {
             Operation operation = node.Value as Operation;
+
+            if (gtsContext.RawCoalesced.TryGetValue(operation, out RawCoalesceMember member))
+            {
+                return GenerateCoalescedRawLoad(gtsContext, resourceManager, gpuAccessor, node, operation, member);
+            }
+
             Operand globalAddress = operation.GetSource(0);
             SearchResult result = FindUniqueBaseAddressCb(gtsContext, block, globalAddress, needsOffset: true);
 
@@ -461,10 +528,15 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
         // (GlobalVectorGroup): with this load's later words unused and the next LDG's word 0 unused too, that LDG's word would otherwise read this one's gmem_vec
         private static LinkedListNode<INode> GenerateRawVectorLoad(ResourceManager resourceManager, LinkedListNode<INode> node, Operation operation, int functionId)
         {
+            node = GenerateCallStorageOp(node, operation, null, functionId);   // the first word's load, now a copy of the call's result
+            ReplaceRawVectorFollowers(resourceManager, node, operation);
+            return node;
+        }
+
+        private static void ReplaceRawVectorFollowers(ResourceManager resourceManager, LinkedListNode<INode> node, Operation operation)
+        {
             int count = operation.GlobalVectorCount;
             int vectorMemoryId = resourceManager.GetRawVectorMemory();
-
-            node = GenerateCallStorageOp(node, operation, null, functionId);   // the first word's load, now a copy of the call's result
 
             LinkedListNode<INode> insertAfter = node;
 
@@ -511,8 +583,6 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     break;
                 }
             }
-
-            return node;
         }
 
         private static bool TryGetRawVectorFunction(
@@ -1291,6 +1361,948 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             Function function = new(ControlFlowGraph.Create(context.GetOperations()).Blocks, "dmsh_raw_find", true, 2, 0);
 
             return gtsContext.RawFindFunction = gtsContext.AddRawFindFunction(function);
+        }
+
+        // nxnative: same-base raw global load coalescing.
+        // Many Ampere/NVN2 shaders read a whole struct through one 64-bit loaded pointer (base + k_i or base + (dynOff + k_i)).
+        // Because every gmem_map entry starts and ends on a 4 KiB boundary (nvn_mtl.m), any <= 4 KiB window [start, start + maxNeed)
+        // crosses at most one entry boundary. One inline dmsh_raw_base(startLo, startHi, maxNeed) at the dominating anchor resolves
+        // entry 0 (h0, r0) from the register cache (0 memory loads on hit) and, only on the cold r0 < maxNeed straddle path, resolves
+        // entry 1 (h1, split, r1) at the 4 KiB boundary. Every member load then runs a zero-call inline LoadRawOff helper (no gmem_map
+        // buffer, no noinline call) that stays bit-exact across adjacent pools, overlapping pools, gaps, and 4 GiB-straddling pools.
+        private const int RawCoalesceMaxWindow = 4096;
+
+        private static bool SameOperand(Operand a, Operand b)
+        {
+            if (ReferenceEquals(a, b))
+            {
+                return true;
+            }
+            return a != null && b != null && a.Type == OperandType.Constant && b.Type == OperandType.Constant && a.Value == b.Value;
+        }
+
+        private static int OperandHash(Operand a)
+        {
+            if (a == null)
+            {
+                return 0;
+            }
+            return a.Type == OperandType.Constant ? HashCode.Combine(1, a.Value) : a.GetHashCode();
+        }
+
+        private readonly struct RawBaseKey : IEquatable<RawBaseKey>
+        {
+            public readonly Operand BaseLo;
+            public readonly Operand BaseHi;
+            public readonly Operand DynOff;
+
+            public RawBaseKey(Operand baseLo, Operand baseHi, Operand dynOff)
+            {
+                BaseLo = baseLo;
+                BaseHi = baseHi;
+                DynOff = dynOff;
+            }
+
+            public bool Equals(RawBaseKey other) => SameOperand(BaseLo, other.BaseLo) && SameOperand(BaseHi, other.BaseHi) && SameOperand(DynOff, other.DynOff);
+            public override bool Equals(object obj) => obj is RawBaseKey other && Equals(other);
+            public override int GetHashCode() => HashCode.Combine(OperandHash(BaseLo), OperandHash(BaseHi), OperandHash(DynOff));
+        }
+
+        private readonly struct RawLoadCandidate
+        {
+            public readonly Operation Op;
+            public readonly BasicBlock Block;
+            public readonly int BlockIndex;
+            public readonly int Order;
+            public readonly int AccessBytes;
+            public readonly int Pattern;   // 0 = exact (lo,hi), 1 = base+k, 2 = base+(dyn+k), 3 = base+dyn (zero-off P2)
+            public readonly Operand BaseLo;
+            public readonly Operand BaseHi;
+            public readonly Operand DynOff;
+            public readonly int Offset;
+
+            public RawLoadCandidate(
+                Operation op,
+                BasicBlock block,
+                int blockIndex,
+                int order,
+                int accessBytes,
+                int pattern,
+                Operand baseLo,
+                Operand baseHi,
+                Operand dynOff,
+                int offset)
+            {
+                Op = op;
+                Block = block;
+                BlockIndex = blockIndex;
+                Order = order;
+                AccessBytes = accessBytes;
+                Pattern = pattern;
+                BaseLo = baseLo;
+                BaseHi = baseHi;
+                DynOff = dynOff;
+                Offset = offset;
+            }
+        }
+
+        private static Operand PeelCopy(Operand op)
+        {
+            for (int d = 0; d < 8 && op is { Type: OperandType.LocalVariable, AsgOp: Operation { Inst: Instruction.Copy } cp }; d++)
+            {
+                op = cp.GetSource(0);
+            }
+            return op;
+        }
+
+        private static Operand PeelZeroAdd(Operand op)
+        {
+            for (int d = 0; d < 8; d++)
+            {
+                op = PeelCopy(op);
+                if (op is { Type: OperandType.LocalVariable, AsgOp: Operation { Inst: Instruction.Add } add })
+                {
+                    if (add.GetSource(0) is { Type: OperandType.Constant, Value: 0 }) { op = add.GetSource(1); continue; }
+                    if (add.GetSource(1) is { Type: OperandType.Constant, Value: 0 }) { op = add.GetSource(0); continue; }
+                }
+                break;
+            }
+            return op;
+        }
+
+        private static bool IsUnsignedLtCarry(Operand cond, Operand sumLo, Operand termA, Operand termB)
+        {
+            cond = PeelCopy(cond);
+            if (cond is not { Type: OperandType.LocalVariable, AsgOp: Operation op })
+            {
+                return false;
+            }
+
+            if (op.Inst == Instruction.CompareLessU32)
+            {
+                Operand lhs = PeelCopy(op.GetSource(0));
+                Operand rhs = PeelCopy(op.GetSource(1));
+                if (lhs != sumLo)
+                {
+                    return false;
+                }
+                if (rhs == termA || rhs == termB)
+                {
+                    return true;
+                }
+                if (rhs.Type == OperandType.Constant &&
+                    ((termA.Type == OperandType.Constant && rhs.Value == termA.Value) ||
+                     (termB.Type == OperandType.Constant && rhs.Value == termB.Value)))
+                {
+                    return true;
+                }
+                return false;
+            }
+
+            // Ampere IADD3 carry: ((lo < a) + (lo < lo)) != 0
+            if (op.Inst == Instruction.CompareNotEqual &&
+                (op.GetSource(1) is { Type: OperandType.Constant, Value: 0 } || op.GetSource(0) is { Type: OperandType.Constant, Value: 0 }))
+            {
+                Operand sumOp = op.GetSource(1) is { Type: OperandType.Constant, Value: 0 } ? op.GetSource(0) : op.GetSource(1);
+                sumOp = PeelCopy(sumOp);
+                if (sumOp is { Type: OperandType.LocalVariable, AsgOp: Operation { Inst: Instruction.Add or Instruction.BitwiseOr } comb })
+                {
+                    Operand a = comb.GetSource(0);
+                    Operand b = comb.GetSource(1);
+                    return (IsCarryTerm(a, sumLo, termA, termB) && IsZeroCarryTerm(b, sumLo)) ||
+                           (IsCarryTerm(b, sumLo, termA, termB) && IsZeroCarryTerm(a, sumLo));
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsZeroCarryTerm(Operand op, Operand sumLo)
+        {
+            op = PeelCopy(op);
+            if (op is { Type: OperandType.Constant, Value: 0 })
+            {
+                return true;
+            }
+            if (op is { Type: OperandType.LocalVariable, AsgOp: Operation o })
+            {
+                if (o.Inst == Instruction.ConditionalSelect &&
+                    o.GetSource(1) is { Type: OperandType.Constant, Value: 1 } &&
+                    o.GetSource(2) is { Type: OperandType.Constant, Value: 0 })
+                {
+                    op = PeelCopy(o.GetSource(0));
+                    if (op is { Type: OperandType.LocalVariable, AsgOp: Operation cmp } &&
+                        cmp.Inst == Instruction.CompareLessU32 &&
+                        PeelCopy(cmp.GetSource(0)) == PeelCopy(cmp.GetSource(1)))
+                    {
+                        return true;
+                    }
+                }
+                else if (o.Inst == Instruction.CompareLessU32 &&
+                         PeelCopy(o.GetSource(0)) == PeelCopy(o.GetSource(1)))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static bool IsCarryTerm(Operand carryOp, Operand sumLo, Operand termA, Operand termB)
+        {
+            carryOp = PeelCopy(carryOp);
+            if (carryOp is not { Type: OperandType.LocalVariable, AsgOp: Operation op })
+            {
+                return false;
+            }
+            if (op.Inst == Instruction.ConditionalSelect &&
+                op.GetSource(1) is { Type: OperandType.Constant, Value: 1 } &&
+                op.GetSource(2) is { Type: OperandType.Constant, Value: 0 })
+            {
+                return IsUnsignedLtCarry(op.GetSource(0), sumLo, termA, termB);
+            }
+            if (op.Inst == Instruction.BitwiseAnd &&
+                (op.GetSource(1) is { Type: OperandType.Constant, Value: 1 } || op.GetSource(0) is { Type: OperandType.Constant, Value: 1 }))
+            {
+                Operand inner = op.GetSource(1) is { Type: OperandType.Constant, Value: 1 } ? op.GetSource(0) : op.GetSource(1);
+                return IsUnsignedLtCarry(inner, sumLo, termA, termB);
+            }
+            return IsUnsignedLtCarry(carryOp, sumLo, termA, termB);
+        }
+
+        private static bool TryMatchHiCarry(Operand hi, Operand sumLo, Operand termA, Operand termB, out Operand baseHi)
+        {
+            hi = PeelZeroAdd(hi);
+            if (IsCarryTerm(hi, sumLo, termA, termB))
+            {
+                baseHi = Const(0);
+                return true;
+            }
+            if (hi is { Type: OperandType.LocalVariable, AsgOp: Operation { Inst: Instruction.Add } add })
+            {
+                Operand s0 = add.GetSource(0);
+                Operand s1 = add.GetSource(1);
+                if (IsCarryTerm(s1, sumLo, termA, termB))
+                {
+                    baseHi = PeelZeroAdd(s0);
+                    return true;
+                }
+                if (IsCarryTerm(s0, sumLo, termA, termB))
+                {
+                    baseHi = PeelZeroAdd(s1);
+                    return true;
+                }
+            }
+            baseHi = null;
+            return false;
+        }
+
+        private static bool DynOffCannotWrap(Operand dynOff, int minOff, int maxOff)
+        {
+            if (minOff < 0 || maxOff < minOff)
+            {
+                return false;
+            }
+            dynOff = PeelZeroAdd(dynOff);
+            if (dynOff is not { Type: OperandType.LocalVariable, AsgOp: Operation op })
+            {
+                return false;
+            }
+            uint align = 0;
+            if (op.Inst == Instruction.ShiftLeft && op.GetSource(1) is { Type: OperandType.Constant } sh && sh.Value > 0 && sh.Value < 31)
+            {
+                align = 1u << sh.Value;
+            }
+            else if (op.Inst == Instruction.Multiply)
+            {
+                Operand c = op.GetSource(1).Type == OperandType.Constant ? op.GetSource(1)
+                          : op.GetSource(0).Type == OperandType.Constant ? op.GetSource(0)
+                          : null;
+                if (c != null && c.Value != 0)
+                {
+                    uint v = (uint)c.Value;
+                    align = v & (0u - v);
+                }
+            }
+            else if (op.Inst == Instruction.BitwiseAnd)
+            {
+                Operand c = op.GetSource(1).Type == OperandType.Constant ? op.GetSource(1)
+                          : op.GetSource(0).Type == OperandType.Constant ? op.GetSource(0)
+                          : null;
+                if (c != null && c.Value != 0)
+                {
+                    uint v = (uint)c.Value;
+                    align = v & (0u - v);
+                }
+            }
+            // If low log2(align) bits of dynOff are zero and 0 <= minOff <= maxOff < align, then
+            // (dynOff + minOff) + (k - minOff) = dynOff | k can never carry out of bit log2(align)-1.
+            return align > 0 && (uint)maxOff < align;
+        }
+
+        private static bool TryExtractAddConst(Operand op, out Operand baseOp, out int k)
+        {
+            op = PeelCopy(op);
+            if (op is { Type: OperandType.LocalVariable, AsgOp: Operation { Inst: Instruction.Add } add })
+            {
+                Operand s0 = add.GetSource(0);
+                Operand s1 = add.GetSource(1);
+                if (s1.Type == OperandType.Constant && s0.Type == OperandType.LocalVariable && s1.Value >= 0 && s1.Value <= RawCoalesceMaxWindow)
+                {
+                    baseOp = PeelCopy(s0);
+                    k = s1.Value;
+                    return true;
+                }
+                if (s0.Type == OperandType.Constant && s1.Type == OperandType.LocalVariable && s0.Value >= 0 && s0.Value <= RawCoalesceMaxWindow)
+                {
+                    baseOp = PeelCopy(s1);
+                    k = s0.Value;
+                    return true;
+                }
+            }
+            baseOp = null;
+            k = 0;
+            return false;
+        }
+
+        private static bool IsPureRawLoad(GtsContext gtsContext, BasicBlock block, Operation operation)
+        {
+            if (FindUniqueBaseAddressCb(gtsContext, block, operation.GetSource(0), needsOffset: true).Found)
+            {
+                return false;
+            }
+
+            Queue<PhiNode> phis = new();
+            HashSet<PhiNode> visited = [];
+            Operand globalAddress = operation.GetSource(0);
+
+            if (globalAddress.AsgOp is Operation addOp && addOp.Inst == Instruction.Add)
+            {
+                Operand src1 = addOp.GetSource(0);
+                Operand src2 = addOp.GetSource(1);
+
+                if (src1.Type == OperandType.Constant && src2.Type == OperandType.LocalVariable)
+                {
+                    globalAddress = src2;
+                }
+                else if (src1.Type == OperandType.LocalVariable && src2.Type == OperandType.Constant)
+                {
+                    globalAddress = src1;
+                }
+            }
+
+            if (globalAddress.AsgOp is PhiNode phi && visited.Add(phi))
+            {
+                phis.Enqueue(phi);
+            }
+            else if (FindUniqueBaseAddressCb(gtsContext, block, operation.GetSource(0), needsOffset: false).Found)
+            {
+                return false;
+            }
+
+            while (phis.TryDequeue(out phi))
+            {
+                for (int srcIndex = 0; srcIndex < phi.SourcesCount; srcIndex++)
+                {
+                    BasicBlock phiBlock = phi.GetBlock(srcIndex);
+                    Operand phiSource = phi.GetSource(srcIndex);
+
+                    if (FindUniqueBaseAddressCb(gtsContext, phiBlock, phiSource, needsOffset: false).Found)
+                    {
+                        return false;
+                    }
+                    else if (phiSource.AsgOp is PhiNode phi2 && visited.Add(phi2))
+                    {
+                        phis.Enqueue(phi2);
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        private static bool Dominates(BasicBlock a, BasicBlock b, bool hasDom)
+        {
+            if (a == b)
+            {
+                return true;
+            }
+            if (!hasDom)
+            {
+                return false;
+            }
+            for (BasicBlock cur = b; cur != null; cur = cur.ImmediateDominator == cur ? null : cur.ImmediateDominator)
+            {
+                if (cur == a)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static int RawAccessBytes(StorageKind kind, int vectorCount)
+        {
+            if (vectorCount > 1)
+            {
+                return vectorCount * 4;
+            }
+            return kind switch
+            {
+                StorageKind.GlobalMemoryS8 or StorageKind.GlobalMemoryU8 => 1,
+                StorageKind.GlobalMemoryS16 or StorageKind.GlobalMemoryU16 => 2,
+                _ => 4,
+            };
+        }
+
+        private static void BuildRawCoalesceGroups(GtsContext gtsContext, BasicBlock[] blocks)
+        {
+            if (blocks.Length == 0)
+            {
+                return;
+            }
+
+            bool hasDom = blocks[0].ImmediateDominator != null;
+            List<RawLoadCandidate> candidates = [];
+            HashSet<RawBaseKey> explicitP1 = [];
+            HashSet<RawBaseKey> explicitP2 = [];
+
+            for (int bi = 0; bi < blocks.Length; bi++)
+            {
+                BasicBlock block = blocks[bi];
+                HashSet<int> vecHeads = [];
+                int order = 0;
+
+                for (LinkedListNode<INode> node = block.Operations.First; node != null; node = node.Next, order++)
+                {
+                    if (node.Value is not Operation op || op.Inst != Instruction.Load || !IsGlobalMemory(op.StorageKind))
+                    {
+                        continue;
+                    }
+
+                    // Skip follower words of a raw vector load whose word 0 is in this block (consumed by ReplaceRawVectorFollowers).
+                    if (op.StorageKind == StorageKind.GlobalMemory && op.GlobalVectorCount > 1)
+                    {
+                        if (op.GlobalVectorWord == 0)
+                        {
+                            vecHeads.Add(op.GlobalVectorGroup);
+                        }
+                        else if (vecHeads.Contains(op.GlobalVectorGroup))
+                        {
+                            continue;
+                        }
+                    }
+
+                    if (!IsPureRawLoad(gtsContext, block, op))
+                    {
+                        continue;
+                    }
+
+                    int vecCount = (op.StorageKind == StorageKind.GlobalMemory && op.GlobalVectorCount > 1 && op.GlobalVectorWord == 0)
+                        ? op.GlobalVectorCount
+                        : 1;
+                    int accessBytes = RawAccessBytes(op.StorageKind, vecCount);
+
+                    Operand lo = PeelCopy(op.GetSource(0));
+                    Operand hi = PeelZeroAdd(op.GetSource(1));
+
+                    // Pattern 1: lo = baseLo + k, hi = baseHi + carry(lo < baseLo)
+                    if (TryExtractAddConst(lo, out Operand p1BaseLo, out int p1K) &&
+                        TryMatchHiCarry(hi, lo, p1BaseLo, Const(p1K), out Operand p1BaseHi))
+                    {
+                        explicitP1.Add(new RawBaseKey(p1BaseLo, p1BaseHi, null));
+                        candidates.Add(new RawLoadCandidate(op, block, bi, order, accessBytes, 1, p1BaseLo, p1BaseHi, null, p1K));
+                        continue;
+                    }
+
+                    // Pattern 2: lo = baseLo + (dynOff + k), hi = baseHi + carry(lo < baseLo)
+                    if (lo is { Type: OperandType.LocalVariable, AsgOp: Operation { Inst: Instruction.Add } loAdd })
+                    {
+                        Operand a = PeelCopy(loAdd.GetSource(0));
+                        Operand b = PeelCopy(loAdd.GetSource(1));
+                        if (TryMatchHiCarry(hi, lo, a, b, out Operand p2BaseHi))
+                        {
+                            if (TryExtractAddConst(b, out Operand dynB, out int kB))
+                            {
+                                explicitP2.Add(new RawBaseKey(a, p2BaseHi, dynB));
+                                candidates.Add(new RawLoadCandidate(op, block, bi, order, accessBytes, 2, a, p2BaseHi, dynB, kB));
+                                continue;
+                            }
+                            if (TryExtractAddConst(a, out Operand dynA, out int kA))
+                            {
+                                explicitP2.Add(new RawBaseKey(b, p2BaseHi, dynA));
+                                candidates.Add(new RawLoadCandidate(op, block, bi, order, accessBytes, 2, b, p2BaseHi, dynA, kA));
+                                continue;
+                            }
+                            // Pattern 3: lo = a + b with carry (candidate zero-offset match for Pattern 2 (a, hi, b) or (b, hi, a), else Pattern 0)
+                            candidates.Add(new RawLoadCandidate(op, block, bi, order, accessBytes, 3, a, p2BaseHi, b, 0));
+                            continue;
+                        }
+                    }
+
+                    // Pattern 0: exact (lo, hi) + 0
+                    candidates.Add(new RawLoadCandidate(op, block, bi, order, accessBytes, 0, lo, hi, null, 0));
+                }
+            }
+
+            if (candidates.Count < 2)
+            {
+                return;
+            }
+
+            Dictionary<RawBaseKey, List<RawLoadCandidate>> byKey = [];
+
+            foreach (RawLoadCandidate c in candidates)
+            {
+                RawBaseKey key;
+                if (c.Pattern == 1 || c.Pattern == 2)
+                {
+                    key = new RawBaseKey(c.BaseLo, c.BaseHi, c.DynOff);
+                }
+                else if (c.Pattern == 3)
+                {
+                    RawBaseKey kAB = new(c.BaseLo, c.BaseHi, c.DynOff);
+                    RawBaseKey kBA = new(c.DynOff, c.BaseHi, c.BaseLo);
+                    if (explicitP2.Contains(kAB))
+                    {
+                        key = kAB;
+                    }
+                    else if (explicitP2.Contains(kBA))
+                    {
+                        key = kBA;
+                    }
+                    else
+                    {
+                        key = new RawBaseKey(PeelCopy(c.Op.GetSource(0)), PeelZeroAdd(c.Op.GetSource(1)), null);
+                    }
+                }
+                else
+                {
+                    key = new RawBaseKey(c.BaseLo, c.BaseHi, null);
+                }
+
+                if (!byKey.TryGetValue(key, out List<RawLoadCandidate> list))
+                {
+                    list = [];
+                    byKey[key] = list;
+                }
+                list.Add(c);
+            }
+
+            foreach ((RawBaseKey key, List<RawLoadCandidate> list) in byKey)
+            {
+                if (list.Count < 2)
+                {
+                    continue;
+                }
+
+                // Partition into dominance-anchored groups; candidates are already in (BlockIndex, Order) order.
+                bool[] used = new bool[list.Count];
+                for (int i = 0; i < list.Count; i++)
+                {
+                    if (used[i])
+                    {
+                        continue;
+                    }
+
+                    RawLoadCandidate anchor = list[i];
+                    List<RawLoadCandidate> members = [anchor];
+                    int minOff = anchor.Offset;
+                    int maxOff = anchor.Offset;
+                    int maxEnd = anchor.Offset + anchor.AccessBytes;
+                    used[i] = true;
+
+                    for (int j = i + 1; j < list.Count; j++)
+                    {
+                        if (used[j])
+                        {
+                            continue;
+                        }
+
+                        RawLoadCandidate cand = list[j];
+                        if (!Dominates(anchor.Block, cand.Block, hasDom))
+                        {
+                            continue;
+                        }
+
+                        int newMin = Math.Min(minOff, cand.Offset);
+                        int newMaxEnd = Math.Max(maxEnd, cand.Offset + cand.AccessBytes);
+                        if (newMaxEnd - newMin > RawCoalesceMaxWindow)
+                        {
+                            continue;
+                        }
+
+                        minOff = newMin;
+                        maxOff = Math.Max(maxOff, cand.Offset);
+                        maxEnd = newMaxEnd;
+                        members.Add(cand);
+                        used[j] = true;
+                    }
+
+                    if (members.Count < 2)
+                    {
+                        continue;
+                    }
+
+                    RawCoalesceGroup group = new(key.BaseLo, key.BaseHi, key.DynOff, minOff, maxOff, maxEnd, anchor.Op);
+                    foreach (RawLoadCandidate m in members)
+                    {
+                        gtsContext.RawCoalesced[m.Op] = new RawCoalesceMember(group, m.Offset);
+                    }
+                }
+            }
+        }
+
+        // Resolve (startLo, startHi, maxNeed) once for a <= 4 KiB window of coalesced raw loads.
+        // Fast path (cache hit with rem >= maxNeed): zero gmem_map loads, zero dmsh_raw_find calls.
+        // Straddle path (rem < maxNeed): at most one 4 KiB page boundary lies inside [start, start + maxNeed), so one extra dmsh_raw_find
+        // resolves entry 1 (h1, split, r1) up front; member loads then never issue any noinline call.
+        private static int GetRawBaseFunction(GtsContext gtsContext, ResourceManager resourceManager, int mapBinding)
+        {
+            if (gtsContext.RawBaseFunction >= 0)
+            {
+                return gtsContext.RawBaseFunction;
+            }
+
+            EmitterContext context = new();
+            Operand startLo = Argument(0);
+            Operand startHi = Argument(1);
+            Operand maxNeed = Argument(2);
+
+            Operand MapWord(Operand entry, int word)
+            {
+                return context.Load(StorageKind.StorageBuffer, mapBinding, Const(0), context.IAdd(entry, Const(word)));
+            }
+
+            int[] cache = resourceManager.GetRawCacheMemory(gtsContext.HasGlobalWrite);
+            int[] baseMem = resourceManager.GetRawBaseMemory();
+
+            Operand baseLo = context.Load(StorageKind.LocalMemory, cache[0]);
+            Operand baseHi = context.Load(StorageKind.LocalMemory, cache[1]);
+            Operand span = context.Load(StorageKind.LocalMemory, cache[2]);
+
+            Operand off = context.ISubtract(startLo, baseLo);
+            Operand cacheHit = context.BitwiseAnd(
+                context.ICompareEqual(startHi, baseHi),
+                context.ICompareLessUnsigned(off, span));
+
+            Operand r0Local = Local();
+            Operand lblMiss = Label();
+            Operand lblStraddle = Label();
+
+            context.BranchIfFalse(lblMiss, cacheHit);
+
+            Operand hitRem = context.ISubtract(span, off);
+            Operand hitHostLo = context.IAdd(startLo, context.Load(StorageKind.LocalMemory, cache[3]));
+            Operand hitCarry = context.ConditionalSelect(context.ICompareLessUnsigned(hitHostLo, startLo), Const(1), Const(0));
+            Operand hitHostHi = context.IAdd(context.IAdd(startHi, context.Load(StorageKind.LocalMemory, cache[4])), hitCarry);
+            context.Store(StorageKind.LocalMemory, baseMem[0], hitHostLo);
+            context.Store(StorageKind.LocalMemory, baseMem[1], hitHostHi);
+            context.Store(StorageKind.LocalMemory, baseMem[2], Const(0));
+            context.Store(StorageKind.LocalMemory, baseMem[3], Const(0));
+            context.Store(StorageKind.LocalMemory, baseMem[4], maxNeed);
+            context.Store(StorageKind.LocalMemory, baseMem[5], Const(0));
+            context.Copy(r0Local, hitRem);
+            context.BranchIfTrue(lblStraddle, context.ICompareLessUnsigned(hitRem, maxNeed));
+            context.Return(hitRem);
+
+            context.MarkLabel(lblMiss);
+
+            Operand foundIdx = context.Call(GetRawFindFunction(gtsContext, mapBinding), true, startLo, startHi);
+            Operand lblUnmapped = Label();
+            context.BranchIfFalse(lblUnmapped, context.ICompareNotEqual(foundIdx, Const(0)));
+
+            Operand found = context.IMultiply(foundIdx, Const(GmemMapEntryWords));
+            Operand dLo = MapWord(found, 4);
+            Operand dHi = MapWord(found, 5);
+            context.Store(StorageKind.LocalMemory, cache[0], MapWord(found, 0));
+            context.Store(StorageKind.LocalMemory, cache[1], MapWord(found, 1));
+            context.Store(StorageKind.LocalMemory, cache[2], MapWord(found, 7));
+            context.Store(StorageKind.LocalMemory, cache[3], dLo);
+            context.Store(StorageKind.LocalMemory, cache[4], dHi);
+            if (gtsContext.HasGlobalWrite)
+            {
+                context.Store(StorageKind.LocalMemory, cache[5], foundIdx);
+            }
+
+            Operand eLo = MapWord(found, 2);
+            Operand eHi = MapWord(found, 3);
+            Operand remLo = context.ISubtract(eLo, startLo);
+            Operand borrow = context.ConditionalSelect(context.ICompareLessUnsigned(eLo, startLo), Const(1), Const(0));
+            Operand remHi = context.ISubtract(context.ISubtract(eHi, startHi), borrow);
+            Operand missRem = context.ConditionalSelect(context.ICompareNotEqual(remHi, Const(0)), Const(-1), remLo);
+
+            Operand missHostLo = context.IAdd(startLo, dLo);
+            Operand missCarry = context.ConditionalSelect(context.ICompareLessUnsigned(missHostLo, startLo), Const(1), Const(0));
+            Operand missHostHi = context.IAdd(context.IAdd(startHi, dHi), missCarry);
+            context.Store(StorageKind.LocalMemory, baseMem[0], missHostLo);
+            context.Store(StorageKind.LocalMemory, baseMem[1], missHostHi);
+            context.Store(StorageKind.LocalMemory, baseMem[2], Const(0));
+            context.Store(StorageKind.LocalMemory, baseMem[3], Const(0));
+            context.Store(StorageKind.LocalMemory, baseMem[4], maxNeed);
+            context.Store(StorageKind.LocalMemory, baseMem[5], Const(0));
+            context.Copy(r0Local, missRem);
+            context.BranchIfTrue(lblStraddle, context.ICompareLessUnsigned(missRem, maxNeed));
+            context.Return(missRem);
+
+            context.MarkLabel(lblUnmapped);
+            context.Store(StorageKind.LocalMemory, baseMem[0], Const(0));
+            context.Store(StorageKind.LocalMemory, baseMem[1], Const(0));
+            context.Store(StorageKind.LocalMemory, baseMem[2], Const(0));
+            context.Store(StorageKind.LocalMemory, baseMem[3], Const(0));
+            context.Store(StorageKind.LocalMemory, baseMem[4], maxNeed);
+            context.Store(StorageKind.LocalMemory, baseMem[5], Const(0));
+            context.Copy(r0Local, Const(0));
+
+            context.MarkLabel(lblStraddle);
+            Operand pageRem = context.ISubtract(Const(4096), context.BitwiseAnd(startLo, Const(4095)));
+            Operand sp = context.ConditionalSelect(context.ICompareNotEqual(r0Local, Const(0)), r0Local, pageRem);
+            Operand lblDone = Label();
+            context.BranchIfFalse(lblDone, context.ICompareLessUnsigned(sp, maxNeed));
+
+            Operand p1Lo = context.IAdd(startLo, sp);
+            Operand p1Carry = context.ConditionalSelect(context.ICompareLessUnsigned(p1Lo, startLo), Const(1), Const(0));
+            Operand p1Hi = context.IAdd(startHi, p1Carry);
+            Operand idx1 = context.Call(GetRawFindFunction(gtsContext, mapBinding), true, p1Lo, p1Hi);
+            context.BranchIfFalse(lblDone, context.ICompareNotEqual(idx1, Const(0)));
+
+            Operand found1 = context.IMultiply(idx1, Const(GmemMapEntryWords));
+            Operand e1Lo = MapWord(found1, 2);
+            Operand e1Hi = MapWord(found1, 3);
+            Operand d1Lo = MapWord(found1, 4);
+            Operand d1Hi = MapWord(found1, 5);
+            Operand r1Lo = context.ISubtract(e1Lo, startLo);
+            Operand b1 = context.ConditionalSelect(context.ICompareLessUnsigned(e1Lo, startLo), Const(1), Const(0));
+            Operand r1Hi = context.ISubtract(context.ISubtract(e1Hi, startHi), b1);
+            Operand r1Span = context.ConditionalSelect(context.ICompareNotEqual(r1Hi, Const(0)), Const(-1), r1Lo);
+
+            Operand h1Lo = context.IAdd(startLo, d1Lo);
+            Operand c1 = context.ConditionalSelect(context.ICompareLessUnsigned(h1Lo, startLo), Const(1), Const(0));
+            Operand h1Hi = context.IAdd(context.IAdd(startHi, d1Hi), c1);
+            context.Store(StorageKind.LocalMemory, baseMem[2], h1Lo);
+            context.Store(StorageKind.LocalMemory, baseMem[3], h1Hi);
+            context.Store(StorageKind.LocalMemory, baseMem[4], sp);
+            context.Store(StorageKind.LocalMemory, baseMem[5], r1Span);
+
+            context.MarkLabel(lblDone);
+            context.Return(r0Local);
+
+            Function function = new(ControlFlowGraph.Create(context.GetOperations()).Blocks, "dmsh_raw_base", true, 3, 0);
+            return gtsContext.RawBaseFunction = gtsContext.AddRawHelperFunction(function);
+        }
+
+        private static string RawKindSuffix(StorageKind kind, int vectorCount)
+        {
+            if (vectorCount > 1)
+            {
+                return $"_v{vectorCount}";
+            }
+            return kind switch
+            {
+                StorageKind.GlobalMemoryS8 => "_s8",
+                StorageKind.GlobalMemoryU8 => "_u8",
+                StorageKind.GlobalMemoryS16 => "_s16",
+                StorageKind.GlobalMemoryU16 => "_u16",
+                _ => string.Empty,
+            };
+        }
+
+        private static Operand EmitSmallIntExtract(EmitterContext context, StorageKind kind, Operand wordVal, Operand byteAddrLo)
+        {
+            Operand bitOffset = HelperFunctionManager.GetBitOffset(context, byteAddrLo);
+            return kind switch
+            {
+                StorageKind.GlobalMemoryS8 => context.BitfieldExtractS32(context.ShiftRightS32(wordVal, bitOffset), Const(0), Const(8)),
+                StorageKind.GlobalMemoryS16 => context.BitfieldExtractS32(context.ShiftRightS32(wordVal, bitOffset), Const(0), Const(16)),
+                StorageKind.GlobalMemoryU8 => context.BitwiseAnd(context.ShiftRightU32(wordVal, bitOffset), Const(byte.MaxValue)),
+                _ => context.BitwiseAnd(context.ShiftRightU32(wordVal, bitOffset), Const(ushort.MaxValue)),
+            };
+        }
+
+        // Zero-call inline load helper for coalesced raw loads: checks entry 0 (fast path), else entry 1 (4 KiB boundary straddle), else 0.
+        // Takes no gmem_map binding and makes no noinline calls, so Metal/LLVM keeps all struct loads straight-line with zero register clobbers.
+        private static int GetRawOffLoadFunction(GtsContext gtsContext, ResourceManager resourceManager, StorageKind kind, int vectorCount)
+        {
+            var key = (kind, vectorCount);
+            if (gtsContext.RawOffFunctions.TryGetValue(key, out int id))
+            {
+                return id;
+            }
+
+            bool isSmall = IsSmallInt(kind);
+            int accessBytes = RawAccessBytes(kind, vectorCount);
+            EmitterContext context = new();
+
+            Operand h0Lo = Argument(0);
+            Operand h0Hi = Argument(1);
+            Operand r0 = Argument(2);
+            Operand h1Lo = Argument(3);
+            Operand h1Hi = Argument(4);
+            Operand split = Argument(5);
+            Operand r1 = Argument(6);
+            Operand delta = Argument(7);
+
+            Operand need = context.IAdd(delta, Const(accessBytes));
+            Operand in0 = context.ICompareLessOrEqualUnsigned(need, r0);
+            Operand in1 = context.BitwiseAnd(
+                context.ICompareGreaterOrEqualUnsigned(delta, split),
+                context.ICompareLessOrEqualUnsigned(need, r1));
+            Operand valid = context.BitwiseOr(in0, in1);
+
+            Operand lblZero = Label();
+            context.BranchIfFalse(lblZero, valid);
+
+            Operand useLo = context.ConditionalSelect(in0, h0Lo, h1Lo);
+            Operand useHi = context.ConditionalSelect(in0, h0Hi, h1Hi);
+
+            Operand res;
+            if (vectorCount > 1)
+            {
+                res = context.Add(Instruction.Load, StorageKind.GlobalMemoryVector, Local(), useLo, useHi, Const(vectorCount), Const(resourceManager.GetRawVectorMemory()), delta);
+            }
+            else if (isSmall)
+            {
+                Operand rawWord = context.Add(Instruction.Load, StorageKind.GlobalMemory, Local(), useLo, useHi, delta, Const(1));
+                res = EmitSmallIntExtract(context, kind, rawWord, context.IAdd(useLo, delta));
+            }
+            else
+            {
+                res = context.Add(Instruction.Load, StorageKind.GlobalMemory, Local(), useLo, useHi, delta);
+            }
+            context.Return(res);
+
+            context.MarkLabel(lblZero);
+            for (int k = 0; k < vectorCount - 1; k++)
+            {
+                context.Store(StorageKind.LocalMemory, resourceManager.GetRawVectorMemory(), Const(k), Const(0));
+            }
+            context.Return(Const(0));
+
+            string name = "LoadRawOff" + RawKindSuffix(kind, vectorCount);
+            Function function = new(ControlFlowGraph.Create(context.GetOperations()).Blocks, name, true, 8, 0);
+            id = gtsContext.AddRawHelperFunction(function);
+            gtsContext.RawOffFunctions[key] = id;
+            return id;
+        }
+
+        private static LinkedListNode<INode> GenerateCoalescedRawLoad(
+            GtsContext gtsContext,
+            ResourceManager resourceManager,
+            IGpuAccessor gpuAccessor,
+            LinkedListNode<INode> node,
+            Operation operation,
+            RawCoalesceMember member)
+        {
+            if (!resourceManager.TryGetStorageBufferBinding(GmemMapCbSlot, 0, write: false, out int mapBinding))
+            {
+                return null;
+            }
+
+            resourceManager.Properties.UsesPhysicalPointers = true;
+            gpuAccessor.Log($"Global memory operation \"{operation.Inst}\" traced to no storage buffer: it goes through the memory pool table.");
+            FindPointerSite(resourceManager, gpuAccessor, operation);
+
+            RawCoalesceGroup g = member.Group;
+            if (g.R0 == null)
+            {
+                Operand startLo, startHi, d0 = null;
+                if (g.DynOff == null)
+                {
+                    if (g.MinOff == 0)
+                    {
+                        startLo = g.BaseLo;
+                        startHi = g.BaseHi;
+                    }
+                    else
+                    {
+                        startLo = Local();
+                        Operand lt = Local();
+                        Operand carry = Local();
+                        startHi = Local();
+                        node.List.AddBefore(node, new Operation(Instruction.Add, startLo, g.BaseLo, Const(g.MinOff)));
+                        node.List.AddBefore(node, new Operation(Instruction.CompareLessU32, lt, startLo, g.BaseLo));
+                        node.List.AddBefore(node, new Operation(Instruction.ConditionalSelect, carry, lt, Const(1), Const(0)));
+                        node.List.AddBefore(node, new Operation(Instruction.Add, startHi, g.BaseHi, carry));
+                    }
+                }
+                else
+                {
+                    if (g.MinOff == 0)
+                    {
+                        d0 = g.DynOff;
+                    }
+                    else
+                    {
+                        d0 = Local();
+                        node.List.AddBefore(node, new Operation(Instruction.Add, d0, g.DynOff, Const(g.MinOff)));
+                    }
+                    startLo = Local();
+                    Operand lt = Local();
+                    Operand carry = Local();
+                    startHi = Local();
+                    node.List.AddBefore(node, new Operation(Instruction.Add, startLo, g.BaseLo, d0));
+                    node.List.AddBefore(node, new Operation(Instruction.CompareLessU32, lt, startLo, g.BaseLo));
+                    node.List.AddBefore(node, new Operation(Instruction.ConditionalSelect, carry, lt, Const(1), Const(0)));
+                    node.List.AddBefore(node, new Operation(Instruction.Add, startHi, g.BaseHi, carry));
+                }
+
+                int maxNeed = g.MaxEnd - g.MinOff;
+                int baseFn = GetRawBaseFunction(gtsContext, resourceManager, mapBinding);
+                int[] baseMem = resourceManager.GetRawBaseMemory();
+                Operand rawR0 = Local();
+                Operand h0Lo = Local();
+                Operand h0Hi = Local();
+                Operand h1Lo = Local();
+                Operand h1Hi = Local();
+                Operand split = Local();
+                Operand rawR1 = Local();
+                node.List.AddBefore(node, new Operation(Instruction.Call, rawR0, Const(baseFn), startLo, startHi, Const(maxNeed)));
+                node.List.AddBefore(node, new Operation(Instruction.Load, StorageKind.LocalMemory, h0Lo, Const(baseMem[0])));
+                node.List.AddBefore(node, new Operation(Instruction.Load, StorageKind.LocalMemory, h0Hi, Const(baseMem[1])));
+                node.List.AddBefore(node, new Operation(Instruction.Load, StorageKind.LocalMemory, h1Lo, Const(baseMem[2])));
+                node.List.AddBefore(node, new Operation(Instruction.Load, StorageKind.LocalMemory, h1Hi, Const(baseMem[3])));
+                node.List.AddBefore(node, new Operation(Instruction.Load, StorageKind.LocalMemory, split, Const(baseMem[4])));
+                node.List.AddBefore(node, new Operation(Instruction.Load, StorageKind.LocalMemory, rawR1, Const(baseMem[5])));
+
+                Operand r0 = rawR0;
+                Operand r1 = rawR1;
+                if (g.DynOff != null && !DynOffCannotWrap(g.DynOff, g.MinOff, g.MaxOff))
+                {
+                    uint maxSpan = (uint)(g.MaxOff - g.MinOff);
+                    if (maxSpan > 0)
+                    {
+                        Operand noWrap = Local();
+                        r0 = Local();
+                        r1 = Local();
+                        node.List.AddBefore(node, new Operation(Instruction.CompareLessOrEqualU32, noWrap, d0, Const(unchecked((int)(uint.MaxValue - maxSpan)))));
+                        node.List.AddBefore(node, new Operation(Instruction.ConditionalSelect, r0, noWrap, rawR0, Const(0)));
+                        node.List.AddBefore(node, new Operation(Instruction.ConditionalSelect, r1, noWrap, rawR1, Const(0)));
+                    }
+                }
+
+                g.H0Lo = h0Lo;
+                g.H0Hi = h0Hi;
+                g.R0 = r0;
+                g.H1Lo = h1Lo;
+                g.H1Hi = h1Hi;
+                g.Split = split;
+                g.R1 = r1;
+            }
+
+            int vectorCount = (operation.StorageKind == StorageKind.GlobalMemory && operation.GlobalVectorCount > 1 && operation.GlobalVectorWord == 0)
+                ? operation.GlobalVectorCount
+                : 1;
+            int offFn = GetRawOffLoadFunction(gtsContext, resourceManager, operation.StorageKind, vectorCount);
+
+            Operand ret = Local();
+            Operation callOp = new(Instruction.Call, ret, Const(offFn), g.H0Lo, g.H0Hi, g.R0, g.H1Lo, g.H1Hi, g.Split, g.R1, Const(member.Delta));
+
+            node.List.AddBefore(node, callOp);
+            operation.TurnIntoCopy(ret);
+            if (vectorCount > 1)
+            {
+                ReplaceRawVectorFollowers(resourceManager, node, operation);
+            }
+            return node;
         }
 
         // nxnative: the last entry of a multi-target helper's buffers whose misses go through the memory pool table (TryGenerateMultiTargetStorageOp); no constant buffer has slot 0xffff

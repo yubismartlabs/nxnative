@@ -7262,7 +7262,8 @@ static void *tex_mtl_resolve(const tex_t *ct, int *in_storage, id<MTLTexture> __
             // one texture in one submission, docs/reference/frame-rate.md). A write by this thread is in order with the commands it replays and is looked for (own); outside a
             // submission (a present) every look reads the pages
             int written = !tracked || (now != pk->seen && nvn_dirty_since_span(pk->span, t->mem, t->L.size, pk->stamp));
-            int kept = written && tracked && !pk->sparse && atomic_load_explicit(&g_sub_open, memory_order_relaxed) && pk->sub == g_sub_serial && pk->own == own;
+            // Untracked storage needs a fresh upload in each submission, and after ordered writes, just like a range that is always dirty.
+            int kept = written && !pk->sparse && atomic_load_explicit(&g_sub_open, memory_order_relaxed) && pk->sub == g_sub_serial && pk->own == own;
             int clean = !written || kept;
             // Only the pages it shares with other data, its bytes there as uploaded: clean, and no write generation started for a neighbour's writes (pkg_edges_clean protects
             // the storage again, so not while a page inside it is being written)

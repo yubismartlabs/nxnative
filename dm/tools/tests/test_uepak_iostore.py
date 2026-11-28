@@ -389,9 +389,22 @@ class IoStore(unittest.TestCase):
         container(self.romfs, 'Game.utoc', [(chunk_id(4, 5), b's')], version=8)
         self.assertFalse(uepak.inline_shaders(pak))   # one without export bundles
 
-    def test_a_pak_with_an_archive_or_only_configs_is_not_inline(self):
+    def test_a_pak_with_an_archive_is_not_inline(self):
         self.assertFalse(uepak.inline_shaders(self.inline_pak(('Engine/GlobalShaderCache-X.bin', 'ShaderArchive-Global-X.ushaderbytecode'))))
-        self.assertFalse(uepak.inline_shaders(self.inline_pak(('Engine/Config/a.ini',))))
+
+    def test_a_content_only_pak_does_not_request_archive_preparation(self):
+        pak = self.inline_pak(('Engine/Config/a.ini', 'Game/Movies/a.usm'))
+        self.assertIsNone(uepak.inline_shaders(pak))
+        self.assertEqual(uepak.unreal_paks(str(self.romfs), inline=False), [])
+
+    def test_build_selects_iostore_libraries_beside_content_only_paks(self):
+        import profile_guess
+        self.inline_pak(('Engine/Config/a.ini',))
+        container(self.romfs, 'Game.utoc', [(LIB, b'l')])
+        with patch.object(profile_guess, 'nso', return_value=(b'',)), patch.object(profile_guess.nso_syms, 'dynsyms', return_value=[]):
+            sources = profile_guess.build_sources(self.root / 'ExeFS', self.romfs, ['main'])
+        self.assertTrue(sources['ue_decode'][0])
+        self.assertFalse(sources['ue_legacy'][0])
 
     KEY = bytes(range(40, 72))
 

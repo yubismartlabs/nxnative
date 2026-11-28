@@ -2093,13 +2093,20 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
             int count = countOperand.Value;
             SpvInstruction vectorType = context.TypeVector(context.TypeU32(), count);
+            SpvInstruction u64 = context.TypeInt(64, 0);
             SpvInstruction addressWords = context.CompositeConstruct(
                 context.TypeVector(context.TypeU32(), 2),
                 context.Get(AggregateType.U32, operation.GetSource(0)),
                 context.Get(AggregateType.U32, operation.GetSource(1)));
+            SpvInstruction addr64 = context.Bitcast(u64, addressWords);
+            if (operation.SourcesCount >= 5)
+            {
+                SpvInstruction off64 = context.UConvert(u64, context.Get(AggregateType.U32, operation.GetSource(4)));
+                addr64 = context.IAdd(u64, addr64, off64);
+            }
             SpvInstruction pointer = context.ConvertUToPtr(
                 context.TypePointer(StorageClass.PhysicalStorageBuffer, vectorType),
-                context.Bitcast(context.TypeInt(64, 0), addressWords));
+                addr64);
 
             SpvInstruction value = context.Load(vectorType, pointer, MemoryAccessMask.Aligned);
             value.AddOperand((SpvLiteralInteger)4);
@@ -2238,17 +2245,28 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             {
                 case StorageKind.GlobalMemory:
                     // nxnative: an address traced to no storage buffer, already moved to the host's GPU address (GlobalToStorage.TryGenerateRawStorageOp):
-                    // a physical storage buffer pointer to its 32-bit word, from the address's low and high words
+                    // a physical storage buffer pointer to its 32-bit word, from the address's low and high words (plus optional byte offset and 4-byte word mask for coalesced loads)
+                    SpvInstruction u64 = context.TypeInt(64, 0);
                     SpvInstruction addressWords = context.CompositeConstruct(
                         context.TypeVector(context.TypeU32(), 2),
                         context.Get(AggregateType.U32, operation.GetSource(0)),
                         context.Get(AggregateType.U32, operation.GetSource(1)));
+                    SpvInstruction addr64 = context.Bitcast(u64, addressWords);
+                    if (operation.Inst == Instruction.Load && operation.SourcesCount >= 3)
+                    {
+                        SpvInstruction off64 = context.UConvert(u64, context.Get(AggregateType.U32, operation.GetSource(2)));
+                        addr64 = context.IAdd(u64, addr64, off64);
+                        if (operation.SourcesCount >= 4 && operation.GetSource(3) is AstOperand { Type: OperandType.Constant, Value: not 0 })
+                        {
+                            addr64 = context.BitwiseAnd(u64, addr64, context.Constant(u64, ~3UL));
+                        }
+                    }
 
                     varType = AggregateType.U32;
 
                     return context.ConvertUToPtr(
                         context.TypePointer(StorageClass.PhysicalStorageBuffer, context.TypeU32()),
-                        context.Bitcast(context.TypeInt(64, 0), addressWords));
+                        addr64);
 
                 case StorageKind.ConstantBuffer:
                 case StorageKind.StorageBuffer:

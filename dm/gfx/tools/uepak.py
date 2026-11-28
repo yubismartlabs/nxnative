@@ -709,7 +709,8 @@ def inline_in_containers(path):
 def pak_shader_sources(path, key=None):
     """(scan inline packages or adjacent IoStore bundles, try extracting shader archives).
     Version 4 uses the inline scan. Versions 8 and 9 can supply both sources: .ushaderbytecode for extraction, and .uexp, a global shader cache or adjacent inline export bundles.
-    Version 11 uses the inline scan when its directory names no .ushaderbytecode and names either .uexp or a global shader cache beside inline export bundles. An empty v11 index supplies neither.
+    Versions 11 and 12 select archives by name and select inline shaders from .uexp or a global cache beside inline export bundles. Content-only paks supply neither.
+    A global cache without those bundles still requests archive preparation, which reports the missing material shaders if there are no shared archives.
     Encrypted paks with no key that can hold shared archives are sent for extraction so it can report the missing key."""
     with open(path, 'rb') as f:
         enc, ioff, isz, _, ver = footer(f)
@@ -730,8 +731,14 @@ def pak_shader_sources(path, key=None):
         if r.take('<i'): r.take('<QQ'); r.raw(20)
         if not r.take('<i'): return False, True
         doff, dsz = r.take('<QQ'); d = at(doff, dsz)
-    inline = b'.ushaderbytecode\0' not in d and (b'.uexp\0' in d or (b'GlobalShaderCache-' in d and inline_in_containers(path)))
-    return inline, not inline
+    def indexed(marker):
+        return marker.encode('ascii') in d or marker.encode('utf-16-le') in d
+    if indexed('.ushaderbytecode\0'): return False, True
+    if indexed('.uexp\0'): return True, False
+    if indexed('GlobalShaderCache-'):
+        inline = inline_in_containers(path)
+        return inline, not inline
+    return False, False
 
 def inline_shaders(path, key=None):
     """True when the split should scan inline shaders, False for archive extraction alone, None for neither."""

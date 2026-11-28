@@ -9,6 +9,48 @@ from loader_census import adrp, got_values, ldr64
 from nso_match import MatchError
 
 
+def check_redengine_va_reserve(module, start):
+    # Verify the bl at +0x14 targets the PLT stub for nn::os::AllocateAddressRegion(uintptr_t*, size_t).
+    call_pc = start + 0x14
+    w = struct.unpack_from('<I', module.image, call_pc)[0]
+    if (w & 0xfc000000) != 0x94000000:
+        raise MatchError('virtual-address initializer does not call at +0x14')
+    imm26 = w & 0x3ffffff
+    if imm26 & (1 << 25): imm26 -= 1 << 26
+    plt = call_pc + imm26 * 4
+    if not 0 <= plt <= module.text_end - 16:
+        raise MatchError('virtual-address initializer call target is outside text')
+    w0, w1, _, w3 = struct.unpack_from('<IIII', module.image, plt)
+    page = adrp(w0, plt)
+    load = ldr64(w1)
+    if page is None or load is None or page[0] != 16 or load[:2] != (17, 16) or w3 != 0xd61f0220:
+        raise MatchError('virtual-address initializer does not target a standard PLT stub')
+    got = page[1] + load[2]
+    img = module.image
+    mod0 = struct.unpack_from('<I', img, 4)[0]
+    if img[mod0:mod0 + 4] != b'MOD0':
+        raise MatchError('missing MOD0 header')
+    dyn = mod0 + struct.unpack_from('<i', img, mod0 + 4)[0]
+    tags = {}
+    for k in range(4096):
+        t, v = struct.unpack_from('<qQ', img, dyn + k * 16)
+        if t == 0: break
+        tags.setdefault(t, v)
+    if not {2, 5, 6, 23} <= tags.keys():
+        raise MatchError('missing dynamic relocation tables')
+    symtab, strtab, jmprel, pltrelsz = tags[6], tags[5], tags[23], tags[2]
+    for off in range(jmprel, jmprel + pltrelsz, 24):
+        r_off, r_info, _ = struct.unpack_from('<QQq', img, off)
+        if r_off == got:
+            name_off = struct.unpack_from('<I', img, symtab + (r_info >> 32) * 24)[0]
+            end = img.index(b'\0', strtab + name_off)
+            sym = bytes(img[strtab + name_off:end]).decode('latin1')
+            if sym != '_ZN2nn2os21AllocateAddressRegionEPmm':
+                raise MatchError(f'virtual-address initializer calls {sym}, not nn::os::AllocateAddressRegion')
+            return
+    raise MatchError('virtual-address initializer PLT slot has no JMPREL entry')
+
+
 def check_lets_go_period_table(module, start):
     # Match the relocated table behind the constructor's ADRP/LDR, whose
     # address the fingerprint normalizes across builds.
@@ -82,5 +124,31 @@ MATCH_CUTS = {'main': [
                                      'eb41f41ceeffc7e1428740e81625bc7b8aa12aa6823cf1fd4152e50e752e2d4f', '1ef244e58a3747e8662a00de83267f6eb3add6bdc8bb0f93639f08eada3e74bb',
                                      'e1bff2e6d23005e70825edfaa2b79abb67f475c3615a6d364cebc76befd49815'], 'cuts': [
             (0x168, '290140b9', '29fddf88', 'stream writer going to sleep: ldr w9,[x9] → ldar (read position after the store-release of "writer sleeping")')]},
+    ]},
+
+    # REDengine 3 (The Witcher 3: Wild Hunt) reserves a 48 GiB address region in DT_INIT_ARRAY[0] without checking the result, then bumps four sub-ranges sequentially out of it:
+    # 8 GiB for the small-block slab allocator (which pre-commits exactly 340 x 1 MiB slabs = 340 MiB once and recycles them), 32 GiB for the main TLSF heap (initial commit
+    # 0x6e900000 = 1.7275 GiB, growing in 4 MiB steps, TLSF table sized dynamically from end - start), 33.7 MiB (0x21b0000) for a fixed TLSF pool, and 40 MiB for a 2 x 20 MiB pool.
+    # Nothing places fixed offsets inside the 48 GiB region. On iOS without the extended-virtual-addressing entitlement, the 48 GiB reservation fails and the first 1 MiB commit
+    # traps with 0xe03. Shrinking the reservation to 2.75 GiB (384 MiB small-block + 2.25 GiB TLSF + 73.7 MiB fixed pools = 2.697 GiB) leaves >530 MiB of TLSF growth headroom
+    # (more than the Switch's 3.21 GiB app pool can physically commit beside the fixed and GPU pools) and ~615 MiB of room for separate regions inside the standard 4.375 GiB iPhone
+    # alias region. Marked alias_only so the Mac loader restores the original 48 / 8 / 32 GiB instructions under its 64 GiB alias region (GitHub issue #3384).
+    {'name': 'REDengine 3 virtual address reservation: 48 GiB → 2.75 GiB for iOS alias region', 'alias_only': True, 'functions': [
+        # 4.04b (0100E67012924000 v262144: main+0x89d8, main+0x4db0)
+        {'size': 40, 'fingerprints': ['cf21ec09194b61c5ab5089baa0e6828d81e59b53fc934b7ae717abf9e0e8c05a'],
+         'check': check_redengine_va_reserve, 'cuts': [
+            (0x10, '8101c0d2', '0100b6d2', 'REDengine 3 VA reservation: mov x1,#0xc00000000 (48 GiB) → #0xb0000000 (2.75 GiB)')]},
+        {'size': 104, 'fingerprints': ['7234b1b192c7cd2c2e41d3de09ed19705e1e99c341cbc0b4dc9e0918ffb9cf35'], 'cuts': [
+            (0x0c, '4900c0d2', '0900a3d2', 'REDengine 3 small-block VA range: mov x9,#0x200000000 (8 GiB) → #0x18000000 (384 MiB)'),
+            (0x30, '0901c0d2', '0900b2d2', 'REDengine 3 TLSF heap VA range: mov x9,#0x800000000 (32 GiB) → #0x90000000 (2.25 GiB)')]},
+    ]},
+    {'name': 'REDengine 3 virtual address reservation: 48 GiB → 2.75 GiB for iOS alias region', 'alias_only': True, 'functions': [
+        # 3.7 (0100E67012924000 v0: main+0x350f80, main+0x34dff0)
+        {'size': 40, 'fingerprints': ['43e8e08ff50941a5a62ab644eb293732d0b1bc859d50efabef60dd7e1fd50342'],
+         'check': check_redengine_va_reserve, 'cuts': [
+            (0x10, 'e1075eb2', '0100b6d2', 'REDengine 3 VA reservation: mov x1,#0xc00000000 (48 GiB) → #0xb0000000 (2.75 GiB)')]},
+        {'size': 124, 'fingerprints': ['22b574f20fe0a891908c0e2659d6cc43232ee8d851e5d9afe01995480e2b2170'], 'cuts': [
+            (0x14, 'e9035fb2', '0900a3d2', 'REDengine 3 small-block VA range: mov x9,#0x200000000 (8 GiB) → #0x18000000 (384 MiB)'),
+            (0x40, 'e8035db2', '0800b2d2', 'REDengine 3 TLSF heap VA range: mov x8,#0x800000000 (32 GiB) → #0x90000000 (2.25 GiB)')]},
     ]},
 ]}

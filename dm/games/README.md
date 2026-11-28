@@ -101,6 +101,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [DARK SOULS: REMASTERED](01004AB00A260000/README.md) | `01004AB00A260000` | 1.0.3 | 4.5.0 | FromSoftware's engine | NVN | [60 fps mode](01004AB00A260000/README.md#frame-rate) |
 | [DAVE THE DIVER](010097F018538000/README.md) | `010097F018538000` | 1.0.6.1267 | 20.5.29 | Unity 6000.0.52f1 IL2CPP, FMOD | NVN | — |
 | [Dead Cells](0100646009FBE000/README.md) | `0100646009FBE000` | 1.25.0 | 13.3.5 | Heaps / HashLink (HL/C) | NVN | — |
+| [Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2](0100AD80208A8000/README.md) | `0100AD80208A8000` | 2.01 | 20.5.17 | Unreal Engine 5, CRIWARE | NVN | — |
 | [Devil May Cry 3 Special Edition](01007B600D5BC000/README.md) | `01007B600D5BC000` | 1.0.1 | 8.2.0 | Capcom's DMC3 engine, FMOD | NVN | — |
 | [Diablo II: Resurrected](0100726014352000/README.md) | `0100726014352000` | 1.0.34.0 | 11.4.3 | Blizzard's D2R engine, FMOD | NVN | [60 fps mode](0100726014352000/README.md#what-it-needs) |
 | [Diablo III: Eternal Collection](01001B300B9BE000/README.md) | `01001B300B9BE000` | 2.7.7.92380 | 8.2.0 | Blizzard's engine, FMOD | NVN | — |
@@ -258,6 +259,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [SteamWorld Heist: Ultimate Edition](010016100A186000/README.md) | `010016100A186000` | 2.2.1 | 4.5.0 | Image & Form's own engine (SteamWorld) | NVN | — |
 | [stitch.](010025801CEA8000/README.md) | `010025801CEA8000` | 1.2 | 21.4.4 | Unity 6000.0.68f1 IL2CPP, FMOD | NVN | [60 fps target](010025801CEA8000/README.md#frame-rate) |
 | [STORY OF SEASONS: Friends of Mineral Town](0100ED400EEC2000/README.md) | `0100ED400EEC2000` | 1.0.5 | 8.2.0 | — | NVN | — |
+| [STORY OF SEASONS: Grand Bazaar](0100DAE01E4C8000/README.md) | `0100DAE01E4C8000` | 1.5.0 | 18.3.5 | Unity 6000.0.28f1 IL2CPP, CRIWARE | NVN | — |
 | [Stray](010075101EF84000/README.md) | `010075101EF84000` | 1.6.0 | 17.5.6 | Unreal Engine 4.27.2, Bink | NVN | [60 fps target](010075101EF84000/README.md#frame-rate) |
 | [Streets of Rage 4](0100EC9010258000/README.md) | `0100EC9010258000` | 1.0.9 | 9.3.1 | MonoGame (C# → C++ by BRUTE) | NVN | — |
 | [Subnautica](0100429011144000/README.md) | `0100429011144000` | 1.23.83358 | 13.3.5 | Unity 2019.4.36f1 IL2CPP, FMOD | NVN | — |
@@ -287,6 +289,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [The Legend of Zelda: Skyward Sword HD](01002DA013484000/README.md) | `01002DA013484000` | 1.0.1 | 11.4.0 | Nintendo's Wii-era engine, ported by Tantalus | NVN | — |
 | [The Legend of Zelda: Tears of the Kingdom](0100F2C0115B6000/README.md) | `0100F2C0115B6000` | 1.4.3 | 20.5.22 | Nintendo EPD (sead / agl / gsys) | NVN | 60 fps target |
 | [The Rogue Prince of Persia](01008D9022462000/README.md) | `01008D9022462000` | 1.1.0 | 20.5.29 | Unity 6000.0.64f1 IL2CPP, FMOD | NVN | 60 fps target, [120 fps option](01008D9022462000/README.md#frame-rate) |
+| [The Witcher 3: Wild Hunt](0100E67012924000/README.md) | `0100E67012924000` | 4.04b | 15.3.0 | CD PROJEKT RED's REDengine 3 (Saber Interactive port) | NVN | 60 fps target |
 | [The Witcher 3: Wild Hunt — Complete Edition](0100A0800E9C4000/README.md) | `0100A0800E9C4000` | 4.04b | 15.3.0 | CD PROJEKT RED's REDengine 3 (Saber Interactive port) | NVN | 60 fps target |
 | [Thronebreaker: The Witcher Tales](0100E910103B4000/README.md) | `0100E910103B4000` | 1.0.2 (provisional Mac profile) | 8.2.1 | Unity 2018.4.2f1 IL2CPP, Wwise | NVN | [60 fps target](0100E910103B4000/README.md#frame-rate) |
 | [Trails in the Sky 2nd Chapter](01007A2027548000/README.md) | `01007A2027548000` | 1.0.4 | 21.4.4 | Nihon Falcom's engine | NVN | — |

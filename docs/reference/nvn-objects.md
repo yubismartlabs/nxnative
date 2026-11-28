@@ -1111,6 +1111,14 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** a synthetic reproduction while investigating [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) [issue #2086](https://github.com/seedds/nxnative/issues/2086). Open: that issue's stale terrain map spans about 33 host pages, more than this race can reach by itself, so its cause is not found; one M2 Max run of 8 minutes saw Goron City's strobing ground stop with the fix, with no miss counts (PR #2136).
 - **Check:** `t_dirty_race` places two adjacent pools in one host page and makes a real store to the second pool immediately after the first becomes writable. Without the fix its texture is incorrectly clean; with the fix it is dirty. Opening and closing without a write stays clean. The existing fault, host-write, busy-page and pool-retirement tests also run without game files.
 
+### Sparse mip chains in short physical pools
+
+- **Symptom:** the host repeatedly uploads packaged textures and may log `swizzled texture storage is not in a memory pool; falling back to the CPU`. On Grand Bazaar's title screen, the re-upload counter rose by about 531 per frame on an Apple M4 Pro.
+- **Cause:** the game places single-layer sparse textures in non-virtual pools with room for every mip but without the final 64 KiB tile padding. The declared allocation size reaches past the pool end, so the upload cannot find a dirty-page span for the texture. A separate upload check discarded the result of every earlier lookup within the same submission when the span was absent.
+- **Fix:** for a non-virtual pool, bound the single-layer storage span to the end of the mip chain when the padded layout exceeds the pool and all mip data fits. Keep the sparse flag and mip geometry. For untracked non-sparse-pool uploads, reuse the upload within its submission while the ordered-write generation is unchanged, and refresh it in the next submission.
+- **Check:** `t_nvn` verifies both the unchanged mip geometry and the newly tracked span. An ordered buffer copy between reads of an untracked texture forces a fresh upload. Repeated reads on either side of the copy reuse their upload, and the next submission sees the CPU write.
+- **Found on:** [STORY OF SEASONS: Grand Bazaar](../../dm/games/0100DAE01E4C8000/README.md#found-on-this-game), [issue #3459](https://github.com/seedds/nxnative/issues/3459).
+
 ### Writes beside a packaged texture in a shared host page
 
 - **Symptom:** packaged textures re-uploaded at every use with unchanged content; upload staging and frame times rising.

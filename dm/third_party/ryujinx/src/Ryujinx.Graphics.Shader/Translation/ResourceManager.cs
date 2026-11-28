@@ -220,6 +220,25 @@ namespace Ryujinx.Graphics.Shader.Translation
             return _rawVectorMemoryId;
         }
 
+        // nxnative: 2-entry span outputs {h0lo, h0hi, h1lo, h1hi, split, r1} written by dmsh_raw_base for same-base coalesced raw loads (GlobalToStorage.GetRawBaseFunction);
+        // read immediately into SSA locals right after the inline call so Metal/LLVM keeps them in registers.
+        private int[] _rawBaseMemoryIds;
+
+        public int[] GetRawBaseMemory()
+        {
+            if (_rawBaseMemoryIds == null)
+            {
+                string[] names = ["gmem_h0lo", "gmem_h0hi", "gmem_h1lo", "gmem_h1hi", "gmem_split", "gmem_r1"];
+                _rawBaseMemoryIds = new int[names.Length];
+                for (int i = 0; i < names.Length; i++)
+                {
+                    _rawBaseMemoryIds[i] = Properties.AddLocalMemory(new MemoryDefinition(names[i], AggregateType.U32, 1));
+                }
+            }
+
+            return _rawBaseMemoryIds;
+        }
+
         private int AddMemoryDefinition(string name, AggregateType type, int arrayLength = 1)
         {
             return Properties.AddLocalMemory(new MemoryDefinition(name, type, arrayLength));

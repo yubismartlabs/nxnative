@@ -1835,6 +1835,68 @@ int main(void) {
         EXPECT("all packaged H/D/W bits plus presence fit in 16 bits",0x1000,((tex_builder_t*)&b)->d.pkg_layout);
     }
 
+    // A fully backed mip chain in a non-virtual pool needs no storage for the sparse tile padding after its last mip.
+    {
+        static uint8_t storage[2 * 65536] __attribute__((aligned(16384)));
+        NVNmemoryPoolBuilder pb; NVNmemoryPool pool;
+        P(nvnMemoryPoolBuilderSetDefaults)(&pb); P(nvnMemoryPoolBuilderSetStorage)(&pb, storage, 16384);
+        P(nvnMemoryPoolInitialize)(&pool, &pb);
+        NVNtextureBuilder b; NVNtexture texture;
+        P(nvnTextureBuilderSetDevice)(&b, &dev); P(nvnTextureBuilderSetDefaults)(&b);
+        P(nvnTextureBuilderSetSize2D)(&b, 16, 8); P(nvnTextureBuilderSetLevels)(&b, 2);
+        P(nvnTextureBuilderSetFormat)(&b, NVN_FORMAT_RGBA8); P(nvnTextureBuilderSetFlags)(&b, NVN_TEXTURE_FLAGS_SPARSE);
+        P(nvnTextureBuilderSetStorage)(&b, &pool, 0); P(nvnTextureInitialize)(&texture, &b);
+        const tex_t *t = (const tex_t *)&texture;
+        EXPECT("sparse builder retains its allocation size", 65536, P(nvnTextureBuilderGetStorageSize)(&b));
+        EXPECT("backed sparse mip chain uses two GOBs", 1024, t->L.size);
+        EXPECT("backed sparse mip chain retains its second mip offset", 512, nvn_tex_level_offset(&t->d, 1));
+        EXPECT("backed sparse mip chain retains its flag", NVN_TEXTURE_FLAGS_SPARSE, P(nvnTextureGetFlags)(&texture));
+        EXPECT("backed sparse mip chain is tracked", 1, nvn_dirty_tracked(t->mem, t->L.size));
+        P(nvnTextureFinalize)(&texture); P(nvnMemoryPoolFinalize)(&pool);
+    }
+
+    // An untracked texture can reuse its upload until an ordered write or the next submission.
+    {
+        enum { bytes = 16 * 8 * 4 };
+        static uint8_t storage[65536] __attribute__((aligned(16384)));
+        NVNmemoryPoolBuilder pb; NVNmemoryPool pool;
+        P(nvnMemoryPoolBuilderSetDefaults)(&pb); P(nvnMemoryPoolBuilderSetStorage)(&pb, storage, sizeof storage);
+        P(nvnMemoryPoolInitialize)(&pool, &pb);
+        nvn_dirty_remove_range(storage);
+        NVNtextureBuilder b; NVNtexture texture; NVNpackagedTextureLayout layout = {{1}};
+        P(nvnTextureBuilderSetDevice)(&b, &dev); P(nvnTextureBuilderSetDefaults)(&b);
+        P(nvnTextureBuilderSetSize2D)(&b, 16, 8); P(nvnTextureBuilderSetFormat)(&b, NVN_FORMAT_RGBA8);
+        P(nvnTextureBuilderSetPackagedTextureLayout)(&b, &layout);
+        P(nvnTextureBuilderSetStorage)(&b, &pool, 0); P(nvnTextureInitialize)(&texture, &b);
+        memset(storage, 0x11, bytes); memset(storage + 4096, 0x22, bytes);
+        NVNcopyRegion region = {0, 0, 0, 16, 8, 1};
+        uint64_t up, before, after;
+        mtl_pkg_stats(&up, &before);
+        P(nvnCommandBufferBeginRecording)(&cb); P(nvnCommandBufferSetCopyRowStride)(&cb, 0);
+        P(nvnCommandBufferCopyTextureToBuffer)(&cb, &texture, NULL, &region, (NVNbufferAddress)(storage + 8192), 0);
+        P(nvnCommandBufferCopyTextureToBuffer)(&cb, &texture, NULL, &region, (NVNbufferAddress)(storage + 12288), 0);
+        P(nvnCommandBufferCopyBufferToBuffer)(&cb, (NVNbufferAddress)(storage + 4096), (NVNbufferAddress)storage, bytes, 0);
+        P(nvnCommandBufferCopyTextureToBuffer)(&cb, &texture, NULL, &region, (NVNbufferAddress)(storage + 16384), 0);
+        P(nvnCommandBufferCopyTextureToBuffer)(&cb, &texture, NULL, &region, (NVNbufferAddress)(storage + 20480), 0);
+        NVNcommandHandle commands = P(nvnCommandBufferEndRecording)(&cb);
+        P(nvnQueueSubmitCommands)(&q, 1, &commands); P(nvnQueueFinish)(&q);
+        mtl_pkg_stats(&up, &after);
+        EXPECT("untracked texture re-uploads only after ordered write", 1, after - before);
+        uint8_t original[bytes]; memset(original, 0x11, sizeof original);
+        EXPECT("both reads before the ordered write see the original", 0, memcmp(storage + 8192, original, bytes) || memcmp(storage + 12288, original, bytes));
+        EXPECT("both reads after the ordered write see its result", 0, memcmp(storage + 16384, storage + 4096, bytes) || memcmp(storage + 20480, storage + 4096, bytes));
+
+        memset(storage, 0x33, bytes);
+        P(nvnCommandBufferBeginRecording)(&cb);
+        P(nvnCommandBufferCopyTextureToBuffer)(&cb, &texture, NULL, &region, (NVNbufferAddress)(storage + 8192), 0);
+        commands = P(nvnCommandBufferEndRecording)(&cb);
+        P(nvnQueueSubmitCommands)(&q, 1, &commands); P(nvnQueueFinish)(&q);
+        mtl_pkg_stats(&up, &after);
+        EXPECT("next submission refreshes the untracked texture", 2, after - before);
+        EXPECT("next submission sees the CPU write", 0, memcmp(storage + 8192, storage, bytes));
+        P(nvnTextureFinalize)(&texture); P(nvnMemoryPoolFinalize)(&pool);
+    }
+
     // 6c. Write-protected dirty pages: after a packaged texture is uploaded its pool pages are read-only; game write → page fault → mark dirty → re-upload on next use; a direct host read() write needs prepare first
     {
         static uint8_t wb_[256 << 10] __attribute__((aligned(16384)));

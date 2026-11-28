@@ -291,5 +291,114 @@ class RawVectorPair(Translated):
         self.assertNotRegex(main, re.escape(vec.group(8)) + r'\[\d\]', 'a word was read from the vector call\'s gmem_vec')
         self.assertTrue(scalar and len(re.findall(scalar.group(1) + r'\(', main)) == 1, 'the second load\'s word 2 has no lookup of its own:\n' + main[:3000])
 
+
+# Unpredicated LDG.E [R5.64 + URZ + imm]: PT (bits 64..67 = 0) so loads live in one basic block, UR = URZ (63 in bits 32..37) so all share R5.64 directly.
+LDG_PT = (LDG[0] & ~0xf, (LDG[1] & ~(0x3f << 32)) | 63 << 32)
+LDG128_PT = (LDG128[0] & ~0xf, (LDG128[1] & ~(0x3f << 32)) | 63 << 32)
+COALESCE_RUNNER = '''#import <Metal/Metal.h>
+#include <stdio.h>
+#include <string.h>
+enum { POOLS = 4, WORDS = 1024, CASES = 8, OFFS = 4 };
+static const uint64_t GUEST[POOLS] = {0x10000000ull, 0x10001000ull, 0x200040000ull, 0x3fffff800ull};
+static const uint32_t OFF[OFFS] = {0, 4, 16, 32};
+static uint32_t value(int p, uint64_t off) { return (uint32_t)(p + 1) << 24 | (uint32_t)(off / 4); }
+static int expect(uint64_t a) { for (int p = 0; p < POOLS; p++) if (a >= GUEST[p] && a < GUEST[p] + WORDS * 4) return (int)value(p, a - GUEST[p]); return 0; }
+int main(int ac, char **av) { @autoreleasepool {
+    id<MTLDevice> d = MTLCreateSystemDefaultDevice(); NSError *e = nil;
+    id<MTLLibrary> l = [d newLibraryWithURL:[NSURL fileURLWithPath:@(av[1])] error:&e]; if (!l) { puts(e.description.UTF8String); return 2; }
+    id<MTLComputePipelineState> ps = [d newComputePipelineStateWithFunction:[l newFunctionWithName:@"k"] error:&e]; if (!ps) { puts(e.description.UTF8String); return 2; }
+    id<MTLBuffer> pool[POOLS], map = [d newBufferWithLength:8192 * 32 options:MTLResourceStorageModeShared];
+    uint32_t *t = map.contents; memset(t, 0, 8192 * 32); for (int k = 1; k < 8192; k++) memset(t + k * 8, 0xff, 8);
+    for (int p = 0; p < POOLS; p++) {
+        pool[p] = [d newBufferWithLength:WORDS * 4 options:MTLResourceStorageModeShared]; uint32_t *w = pool[p].contents; for (int i = 0; i < WORDS; i++) w[i] = value(p, i * 4);
+        uint64_t s = GUEST[p], end = s + WORDS * 4, delta = pool[p].gpuAddress - s, *ent = (uint64_t *)(t + (p + 1) * 8); ent[0] = s; ent[1] = end; ent[2] = delta;
+        if ((s >> 32) == ((end - 1) >> 32)) t[(p + 1) * 8 + 7] = WORDS * 4;
+    }
+    // 0: normal hit inside pool A
+    // 1: second normal hit inside pool A (cache hit fast path!)
+    // 2: adjacent pool straddle: start at A end - 16 (0x10000ff0) -> +0,+4 in A, +16,+32 in adjacent pool B
+    // 3: unmapped-before-pool straddle: start at A start - 16 (0x0ffffff0) -> +0,+4 unmapped (0), +16,+32 in pool A
+    // 4: pool-end-into-unmapped straddle: start at B end - 16 (0x10001ff0) -> +0,+4 in B, +16,+32 unmapped (0)
+    // 5: 4 GiB-straddling pool D (span == 0): start at 0x3ffffffe0 -> +0,+4 below 4 GiB, +32 above 4 GiB
+    // 6: completely unmapped (0x50000000) -> all 0
+    // 7: above 4 GiB pool C (0x200040100) -> all in C
+    static const uint64_t BASES[CASES] = {
+        0x10000040ull, 0x10000100ull, 0x10000ff0ull, 0x0ffffff0ull,
+        0x10001ff0ull, 0x3ffffffe0ull, 0x50000000ull, 0x200040100ull
+    };
+    id<MTLBuffer> addr = [d newBufferWithLength:CASES * 8 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> out = [d newBufferWithLength:CASES * OFFS * 4 options:MTLResourceStorageModeShared];
+    memcpy(addr.contents, BASES, sizeof BASES);
+    id<MTLCommandQueue> q = [d newCommandQueue]; id<MTLCommandBuffer> c = [q commandBuffer]; id<MTLComputeCommandEncoder> ce = [c computeCommandEncoder];
+    [ce setComputePipelineState:ps]; [ce setBuffer:map offset:0 atIndex:0]; [ce setBuffer:addr offset:0 atIndex:1]; [ce setBuffer:out offset:0 atIndex:2];
+    for (int p = 0; p < POOLS; p++) [ce useResource:pool[p] usage:MTLResourceUsageRead];
+    [ce dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; [ce endEncoding]; [c commit]; [c waitUntilCompleted];
+    const int *got = out.contents; int bad = 0;
+    for (int i = 0; i < CASES; i++) for (int j = 0; j < OFFS; j++) {
+        int want = expect(BASES[i] + OFF[j]);
+        if (got[i * OFFS + j] != want) { bad++; printf("case %d off %u (0x%llx): got 0x%x want 0x%x\\n", i, OFF[j], BASES[i] + OFF[j], got[i * OFFS + j], want); }
+    }
+    printf("bad %d of %d\\n", bad, CASES * OFFS); return bad != 0;
+} }
+'''
+
+
+@unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
+class RawCoalesced(Translated):
+    """Same-base raw global loads coalesce onto one dmsh_raw_base(startLo, startHi, maxNeed) lookup + zero-call inline LoadRawOff helpers,
+    remaining bit-exact across normal cache hits, adjacent-pool straddles, unmapped-before-pool straddles, pool-end straddles, and 4 GiB-straddling pools."""
+    def msl(self):
+        # Four unpredicated scalar loads at +0, +4, +16, +32 from the same base [R5.64 + UR4]
+        def ldg_off(rd, off):
+            return (LDG_PT[0], (LDG_PT[1] & ~(0xff << 16) & ~(0xffffff << 40)) | rd << 16 | off << 40)
+        code = (s2r_tid(9), s2r_tid(5),
+                ldg_off(6, 0), ldg_off(7, 4), ldg_off(8, 16), ldg_off(10, 32),
+                sts(6, 0), sts(7, 4), sts(8, 8), sts(10, 12))
+        return self.translate(b''.join(inst(*waiting(i)) for i in code) + inst(*EXIT), shared=0x1000)
+
+    def test_four_same_base_loads_coalesce_to_one_base_lookup(self):
+        msl = self.msl()
+        self.assertIn('int dmsh_raw_base(', msl)
+        main = msl[msl.index('kernel void main0'):]
+        self.assertEqual(len(re.findall(r'dmsh_raw_base\(', main)), 1, main)
+        # Coalesced load helper takes no gmem_map buffer and makes no dmsh_raw_find call
+        off_fn = re.search(r'(?m)^int (_\d+)\(([^)]+)\)\n\{\n    int _\d+ = _\d+ \+ 4;\n    bool ', msl)
+        self.assertTrue(off_fn, msl[:4000])
+        body = msl[off_fn.end():msl.index('\n}\n', off_fn.end())]
+        self.assertNotIn('dmsh_raw_find(', body)
+        self.assertEqual(len(re.findall(rf'\b{off_fn.group(1)}\(', main)), 4, main)
+
+    @unittest.skipUnless(shutil.which('xcrun') and sys.platform == 'darwin', 'needs Metal')
+    def test_coalesced_reads_and_boundary_straddles_on_gpu(self):
+        msl = self.msl()
+        bm = re.search(r'(?m)^int dmsh_raw_base\(thread const int& _\d+, thread const int& _\d+, thread const int& _\d+, const device (_\d+)& \w+' + CACHE5 + r', thread uint& _\d+, thread uint& _\d+, thread uint& _\d+, thread uint& _\d+, thread uint& _\d+, thread uint& _\d+\)', msl)
+        self.assertTrue(bm, msl[:4000])
+        off_fn = re.search(r'(?m)^int (_\d+)\([^)]+\)\n\{\n    int _\d+ = _\d+ \+ 4;\n    bool ', msl)
+        self.assertTrue(off_fn, msl[:4000])
+        kernel = (msl[:msl.index('kernel void main0')] +
+                  f'kernel void k(const device {bm.group(1)}& map [[buffer(0)]], const device uint2* bases [[buffer(1)]], device int* out [[buffer(2)]])\n'
+                  '{\n    uint c0 = 0u, c1 = 0u, c2 = 0u, c3 = 0u, c4 = 0u;\n'
+                  '    uint h0lo = 0u, h0hi = 0u, h1lo = 0u, h1hi = 0u, sp = 0u, r1 = 0u;\n'
+                  '    const int offs[4] = {0, 4, 16, 32};\n'
+                  '    for (int i = 0; i < 8; i++)\n    {\n'
+                  '        int lo = int(bases[i].x), hi = int(bases[i].y);\n'
+                  '        int r0 = dmsh_raw_base(lo, hi, 36, map, c0, c1, c2, c3, c4, h0lo, h0hi, h1lo, h1hi, sp, r1);\n'
+                  '        for (int j = 0; j < 4; j++)\n'
+                  f'            out[i * 4 + j] = {off_fn.group(1)}(int(h0lo), int(h0hi), r0, int(h1lo), int(h1hi), int(sp), int(r1), offs[j]);\n'
+                  '    }\n}\n')
+        for form, src in (('inline', kernel), ('noinline', raw_noinline(kernel))):
+            with tempfile.TemporaryDirectory() as w:
+                w = Path(w)
+                (w / 'k.metal').write_text(src)
+                r = subprocess.run(MAC_METAL + [str(w / 'k.metal'), '-o', str(w / 'k.air')], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr[-3000:])
+                subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(w / 'k.air'), '-o', str(w / 'k.metallib')], check=True)
+                (w / 'r.m').write_text(COALESCE_RUNNER)
+                subprocess.run(['clang', '-fobjc-arc', '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
+                out = subprocess.run([str(w / 'r'), str(w / 'k.metallib')], capture_output=True, text=True)
+                self.assertEqual(out.returncode, 0, form + ': ' + out.stdout + out.stderr)
+                self.assertIn('bad 0 of 32', out.stdout, form + ': ' + out.stdout)
+
+
 if __name__ == '__main__':
     unittest.main()

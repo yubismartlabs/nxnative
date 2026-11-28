@@ -1,0 +1,30 @@
+# Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2, Switch update 2.01, Unreal Engine 5, SDK 20.5.17, NVN.
+
+title_id	0100AD80208A8000
+program_id	0100AD80208A8000
+
+name	Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2
+ipa	DemonSlayerKimetsuNoYaibaTheHinokamiChronicles2.ipa
+app_category	public.app-category.games
+
+build	v1114112	2.01	main=23f5e6c535c45844a242b4f0bb62bd2d	subsdk0=ab62fe8edd07a6a293f885d54359e559	sdk=0023a1b06130cd795f7bc4613772af0a
+package	v1114112
+shader_versions	v1114112
+
+modules	main subsdk0 sdk
+romfs_marker	APK2/Content/Paks/pakchunk0-Switch.ucas
+zip_store	.pak:.ttf:.txt:.ucas:.utoc:.metallib
+
+# The NPDM declares 16 MiB of system resource. The Unreal engine reservation fits via the shared gate in this layout.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_note	Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2 shaders
+
+# Use near-zero depth for offline pipelines. The vertex shaders select buffer textures through the c2 driver tables.
+depth_mode	zero
+tex_dyn_slots	on
